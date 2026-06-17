@@ -6,3 +6,4 @@ bot.log
 web_server.log
 linux_chrome_data/
 *.egg-info/
+handoff_memory.md
