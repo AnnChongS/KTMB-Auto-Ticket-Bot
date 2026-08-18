@@ -10,7 +10,7 @@
             "to": "JB SENTRAL ETS Intercity",
             "year": 2026,
             "month": 5,
-            "day": "17",
+            "day": 17,
             "time": "14:31",
             "is_old_train": false,
             "type": "监控计划 1"

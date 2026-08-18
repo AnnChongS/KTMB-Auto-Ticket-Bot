@@ -1,6 +1,6 @@
 **[English](README.md)** | 中文
 
-# 🚄 KTMB 自动抢票机器人 v1.1
+# 🚄 KTMB 自动抢票机器人 v1.2
 
 马来西亚 KTMB 火车票自动抢票系统，支持 **Windows** 和 **Linux** 双平台运行。
 
@@ -16,11 +16,14 @@
 | 📅 **多任务监控** | config.json 中配置多个搜索任务，逐个监控 |
 | 💺 **智能选座** | 遍历车厢，优先普通座 → 大桌座；旧式火车支持靠窗/朝前偏好 |
 | 💳 **多种付款** | KTM Wallet（全自动扣款）、DuitNow（生成二维码）、TnG、Manual |
-| 🔔 **Telegram 通知** | 抢票成功、心跳存活、崩溃报错 → 自动推送文字+截图 |
+| 🔔 **Telegram 通知** | 抢票成功、心跳存活、崩溃报错 → 自动推送文字+截图（含重试机制） |
 | 📱 **远程控制** | 通过 Telegram Bot 发送指令操控机器人 |
-| 🖥️ **Web 管理面板** | Flask 后端，浏览器打开 `localhost:5000` 配置/启停/看日志 |
+| 🖥️ **Web 管理面板** | Flask 后端 + 密码认证，浏览器打开 `localhost:5000` 配置/启停/看日志 |
 | 🛡️ **安全登出** | `/logout` 远程安全退出账号，避免 30 分钟冷却 |
 | 🤖 **开机防误触** | 启动时自动清空历史 Telegram 指令，防止旧 `/logout` 误执行 |
+| 🔐 **Web 面板认证** | 密码保护，防止未授权访问 |
+| 📝 **专业日志** | 结构化日志系统，同时输出到文件和控制台 |
+| 🔄 **通知重试** | Telegram 通知自动重试，指数退避策略 |
 
 ---
 
@@ -44,6 +47,9 @@
 
 浏览器打开 **http://localhost:5000**
 
+> 🔐 **默认密码：** `admin123`
+> 可通过环境变量修改：`export KTMB_WEB_PASSWORD=你的密码`
+
 在 Web 界面填写：
 - KTMB 账号密码
 - 监控路线和日期
@@ -51,6 +57,19 @@
 - 付款方式
 
 点击 **保存** → **启动**，坐等出票 🎉
+
+---
+
+## ⚙️ 环境变量
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `KTMB_WEB_PASSWORD` | `admin123` | Web 面板登录密码 |
+| `KTMB_WEB_HOST` | `127.0.0.1` | Web 面板监听地址 |
+| `KTMB_WEB_PORT` | `5000` | Web 面板监听端口 |
+| `KTMB_WEB_DEBUG` | `false` | 是否启用 Flask 调试模式 |
+| `KTMB_MAX_LOG_LINES` | `200` | API 返回的最大日志行数 |
+| `FLASK_SECRET_KEY` | (自动生成) | Flask 会话加密密钥 |
 
 ---
 
@@ -78,12 +97,15 @@
 ├── app.py                # Flask Web 管理面板
 ├── config.json           # 配置文件（需自行创建）
 ├── config.example.json   # 配置模板
+├── requirements.txt      # Python 依赖（含版本锁定）
 ├── start_bot.bat         # Windows 一键启动脚本
 ├── start_linux.sh        # Linux 一键启动脚本
 ├── templates/
-│   └── index.html        # Web 管理界面
-└── static/
-    └── favicon.ico       # 图标
+│   ├── index.html        # Web 管理界面
+│   └── login.html        # Web 面板登录页
+├── static/
+│   └── favicon.ico       # 图标
+└── bot.log               # 机器人运行日志（自动生成）
 ```
 
 ---
@@ -95,7 +117,7 @@
 | 字段 | 说明 |
 |------|------|
 | `from` / `to` | 出发站 / 到达站（必须与 KTMB 网站显示一致） |
-| `year` / `month` / `day` | 目标日期 |
+| `year` / `month` / `day` | 目标日期（整数类型） |
 | `time` | 目标车次时间，格式 `HH:MM` |
 | `is_old_train` | 是否旧式火车（影响选座逻辑） |
 
@@ -142,6 +164,15 @@
   ↓
 付款完成 → 通知用户 → 程序退出
 ```
+
+---
+
+## 🔒 安全说明
+
+- **Web 面板密码**：请通过环境变量 `KTMB_WEB_PASSWORD` 修改默认密码 `admin123`
+- **网络访问**：Web 面板默认仅监听 `127.0.0.1`（本地访问），设置 `KTMB_WEB_HOST=0.0.0.0` 可允许远程访问（不建议，需额外安全措施）
+- **配置文件**：包含敏感凭据，请确保 `config.json` 已加入 `.gitignore` 并设置适当的文件权限
+- **Telegram Token**：请妥善保管 Bot Token，不要提交到版本控制系统
 
 ---
 

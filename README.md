@@ -1,6 +1,6 @@
 English | **[中文](README_zh.md)**
 
-# 🚄 KTMB Auto Ticket Bot v1.1
+# 🚄 KTMB Auto Ticket Bot v1.2
 
 An automated ticket booking system for Malaysia's KTMB train service, supporting both **Windows** and **Linux** platforms.
 
@@ -18,9 +18,12 @@ Powered by Playwright browser automation to simulate real user operations — fu
 | 💳 **Multiple Payment Methods** | KTM Wallet (auto-deduct), DuitNow (QR code), TnG, Manual |
 | 🔔 **Telegram Notifications** | Booking success, heartbeat status, crash alerts → auto push with text + screenshots |
 | 📱 **Remote Control** | Control the bot via Telegram Bot commands |
-| 🖥️ **Web Management Panel** | Flask backend, open `localhost:5000` in browser to configure/start/stop/view logs |
+| 🖥️ **Web Management Panel** | Flask backend with password authentication, open `localhost:5000` in browser to configure/start/stop/view logs |
 | 🛡️ **Safe Logout** | `/logout` remotely logs out safely, avoiding the 30-minute cooldown |
 | 🤖 **Anti-Misfire on Boot** | Automatically clears old Telegram commands on startup to prevent stale `/logout` execution |
+| 🔐 **Web Panel Authentication** | Password-protected web panel to prevent unauthorized access |
+| 📝 **Structured Logging** | Professional logging system with file output and console display |
+| 🔄 **Notification Retry** | Telegram notifications with automatic retry and exponential backoff |
 
 ---
 
@@ -44,6 +47,9 @@ The script handles everything automatically: creates virtual environment, instal
 
 Open **http://localhost:5000** in your browser
 
+> 🔐 **Default password:** `admin123`
+> You can change it via environment variable: `export KTMB_WEB_PASSWORD=your_password`
+
 Fill in the web interface:
 - KTMB account credentials
 - Routes and dates to monitor
@@ -51,6 +57,19 @@ Fill in the web interface:
 - Payment method
 
 Click **Save** → **Start**, then wait for tickets 🎉
+
+---
+
+## ⚙️ Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KTMB_WEB_PASSWORD` | `admin123` | Web panel login password |
+| `KTMB_WEB_HOST` | `127.0.0.1` | Web panel listen address |
+| `KTMB_WEB_PORT` | `5000` | Web panel listen port |
+| `KTMB_WEB_DEBUG` | `false` | Enable Flask debug mode |
+| `KTMB_MAX_LOG_LINES` | `200` | Maximum log lines returned by API |
+| `FLASK_SECRET_KEY` | (auto-generated) | Flask session encryption key |
 
 ---
 
@@ -78,12 +97,15 @@ Click **Save** → **Start**, then wait for tickets 🎉
 ├── app.py                # Flask web management panel
 ├── config.json           # Configuration file (user-created)
 ├── config.example.json   # Configuration template
+├── requirements.txt      # Python dependencies with version pinning
 ├── start_bot.bat         # Windows one-click startup script
 ├── start_linux.sh        # Linux one-click startup script
 ├── templates/
-│   └── index.html        # Web management interface
-└── static/
-    └── favicon.ico       # Icon
+│   ├── index.html        # Web management interface
+│   └── login.html        # Web panel login page
+├── static/
+│   └── favicon.ico       # Icon
+└── bot.log               # Bot runtime log (auto-generated)
 ```
 
 ---
@@ -95,7 +117,7 @@ Click **Save** → **Start**, then wait for tickets 🎉
 | Field | Description |
 |-------|-------------|
 | `from` / `to` | Departure / Arrival station (must match KTMB website display names) |
-| `year` / `month` / `day` | Target travel date |
+| `year` / `month` / `day` | Target travel date (integer values) |
 | `time` | Target train time, format `HH:MM` |
 | `is_old_train` | Whether it's an old-style train (affects seat selection logic) |
 
@@ -142,6 +164,15 @@ Select seat → Fill passenger info → Confirm order
   ↓
 Payment complete → Notify user → Program exits
 ```
+
+---
+
+## 🔒 Security Notes
+
+- **Web Panel Password**: Change the default password `admin123` via environment variable `KTMB_WEB_PASSWORD`
+- **Network Access**: Web panel defaults to `127.0.0.1` (localhost only). Set `KTMB_WEB_HOST=0.0.0.0` to allow remote access (not recommended without additional security)
+- **Config File**: Contains sensitive credentials. Ensure `config.json` is in `.gitignore` and has restricted file permissions
+- **Telegram Token**: Store your bot token securely; do not commit it to version control
 
 ---
 

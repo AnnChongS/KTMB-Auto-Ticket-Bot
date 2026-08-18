@@ -19,17 +19,25 @@
         .task-block:hover { border-color: #29549e !important; box-shadow: 0 2px 8px rgba(41,84,158,0.1); }
         .swap-btn { background-color: #f8f9fa; border: 1px solid #ced4da; color: #495057; border-radius: 50%; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: 0.2s; margin: 0 auto; }
         .swap-btn:hover { background-color: #e2e6ea; transform: rotate(180deg); }
-        .lang-switch { position: fixed; top: 15px; right: 20px; z-index: 1000; background: rgba(41,84,158,0.9); color: white; border: none; border-radius: 20px; padding: 6px 14px; font-size: 13px; cursor: pointer; transition: 0.2s; }
-        .lang-switch:hover { background: rgba(41,84,158,1); transform: scale(1.05); }
+        .top-bar { position: fixed; top: 15px; right: 20px; z-index: 1000; display: flex; gap: 8px; }
+        .top-btn { background: rgba(41,84,158,0.9); color: white; border: none; border-radius: 20px; padding: 6px 14px; font-size: 13px; cursor: pointer; transition: 0.2s; text-decoration: none; }
+        .top-btn:hover { background: rgba(41,84,158,1); transform: scale(1.05); color: white; }
+        .toast-container { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 9999; }
     </style>
 </head>
 <body>
 
-<button class="lang-switch" onclick="toggleLang()" data-i18n="lang_btn">🌐 中/EN</button>
+<div class="top-bar">
+    <button class="top-btn" onclick="toggleLang()" data-i18n="lang_btn">🌐 中/EN</button>
+    <a class="top-btn" href="/logout" title="登出">🚪 登出</a>
+</div>
+
+<!-- Toast 通知容器 -->
+<div class="toast-container" id="toast-container"></div>
 
 <div class="container py-4">
     <h2 class="text-center mb-4" style="color: #29549e;"><b data-i18n="title">🚄 KTMB 抢票指挥官</b></h2>
-    
+
     <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
             <span data-i18n="live_monitor">💻 实时监控台</span>
@@ -48,7 +56,7 @@
         <div class="card-header" data-i18n="task_config">⚙️ 任务配置 (修改后请先点击底部保存)</div>
         <div class="card-body">
             <form id="configForm">
-                
+
                 <datalist id="stations">
                     <option value="KLUANG ETS Intercity">
                     <option value="JB SENTRAL ETS Intercity">
@@ -60,11 +68,11 @@
                     <h6 class="text-primary m-0" data-i18n="travel_plans">1. 乘车计划 (可添加多个时间段)</h6>
                     <button type="button" class="btn btn-sm btn-outline-primary" onclick="addTask()" data-i18n="add_plan">➕ 添加计划</button>
                 </div>
-                
+
                 <div id="tasks-container"></div>
 
                 <hr>
-                
+
                 <h6 class="text-primary" data-i18n="account_payment">2. 账号与支付</h6>
                 <div class="row g-2 mb-3">
                     <div class="col-md-6"><label class="form-label text-muted small" data-i18n="ktmb_email">KTMB 邮箱</label><input type="email" class="form-control" id="email" value="{{ config.get('account', {}).get('email', '') }}"></div>
@@ -82,7 +90,7 @@
                 <hr>
 
                 <h6 class="text-primary" data-i18n="bot_settings">3. 机器人参数 (偏好 & 通知)</h6>
-                
+
                 <div class="row g-2 mb-3">
                     <div class="col-md-6"><label class="form-label text-muted small">Telegram Token</label>
                         <input type="text" class="form-control" id="tg_token" placeholder="123456789:ABCdef..." value="{{ config.get('notification', {}).get('telegram_token', '') }}">
@@ -92,7 +100,6 @@
                     </div>
                 </div>
 
-                <!-- 🔥 新增的心跳截图开关 -->
                 <div class="row g-2 mb-3">
                     <div class="col-12">
                         <div class="p-2 border rounded bg-light border-primary border-opacity-25">
@@ -164,6 +171,25 @@
 </div>
 
 <script>
+    // ==================== Toast 通知系统 ====================
+    function showToast(message, type = 'success') {
+        const container = document.getElementById('toast-container');
+        const toast = document.createElement('div');
+        toast.className = `toast align-items-center text-bg-${type} border-0 show`;
+        toast.setAttribute('role', 'alert');
+        toast.innerHTML = `
+            <div class="d-flex">
+                <div class="toast-body">${message}</div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+            </div>
+        `;
+        container.appendChild(toast);
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
     // ==================== i18n System ====================
     const i18nDict = {
         zh: {
@@ -199,7 +225,6 @@
             heartbeat_interval: '心跳间隔 (轮次)',
             refresh_interval: '刷票间隔 (秒)',
             save_all: '💾 保存所有配置',
-            // Task template labels
             from_station: '出发站',
             to_station: '到达站',
             year: '年',
@@ -212,11 +237,11 @@
             delete_plan_title: '删除此计划',
             swap_stations_title: '对换出发/到达站',
             monitor_plan: '监控计划',
-            // Alert messages
-            alert_saved: '配置已保存！',
-            alert_started: '机器人已启动！',
-            alert_stopped: '机器人已停止！',
-            alert_already_running: '机器人已经在运行中！'
+            alert_saved: '✅ 配置已保存！',
+            alert_started: '✅ 机器人已启动！',
+            alert_stopped: '✅ 机器人已停止！',
+            alert_already_running: '⚠️ 机器人已经在运行中！',
+            alert_network_error: '❌ 网络错误，请检查连接'
         },
         en: {
             page_title: 'KTMB Ticket Commander Web',
@@ -251,7 +276,6 @@
             heartbeat_interval: 'Heartbeat Interval (rounds)',
             refresh_interval: 'Refresh Interval (sec)',
             save_all: '💾 Save All Settings',
-            // Task template labels
             from_station: 'From Station',
             to_station: 'To Station',
             year: 'Year',
@@ -264,11 +288,11 @@
             delete_plan_title: 'Delete this plan',
             swap_stations_title: 'Swap stations',
             monitor_plan: 'Monitor Plan',
-            // Alert messages
-            alert_saved: 'Settings saved!',
-            alert_started: 'Bot started!',
-            alert_stopped: 'Bot stopped!',
-            alert_already_running: 'Bot is already running!'
+            alert_saved: '✅ Settings saved!',
+            alert_started: '✅ Bot started!',
+            alert_stopped: '✅ Bot stopped!',
+            alert_already_running: '⚠️ Bot is already running!',
+            alert_network_error: '❌ Network error, please check connection'
         }
     };
 
@@ -285,11 +309,8 @@
                 el.textContent = i18nDict[currentLang][key];
             }
         });
-        // Update html lang attribute
         document.documentElement.lang = currentLang === 'zh' ? 'zh' : 'en';
-        // Re-render tasks so dynamic labels update
         renderTasks();
-        // Re-apply status text
         const statusEl = document.getElementById('status-text');
         if (statusEl) {
             const isRunning = statusEl.getAttribute('data-status') === 'running';
@@ -303,7 +324,6 @@
         applyLang();
     }
 
-    // Apply saved language on load
     applyLang();
     // ==================== End i18n System ====================
 
@@ -316,14 +336,14 @@
 
     function renderTasks() {
         const container = document.getElementById('tasks-container');
-        container.innerHTML = ''; 
+        container.innerHTML = '';
 
         tasks.forEach((task, index) => {
-            const isOldTrain = task.is_old_train !== false; 
+            const isOldTrain = task.is_old_train !== false;
             const html = `
             <div class="task-block border rounded p-3 mb-3 position-relative shadow-sm" data-index="${index}">
                 ${tasks.length > 1 ? `<button type="button" class="btn-close position-absolute top-0 end-0 m-2" onclick="removeTask(${index})" title="${t('delete_plan_title')}"></button>` : ''}
-                
+
                 <div class="row g-2 mb-2 align-items-end">
                     <div class="col-5">
                         <label class="form-label text-muted small mb-1">${t('from_station')}</label>
@@ -341,13 +361,13 @@
                 <div class="row g-2 mb-2">
                     <div class="col-4"><label class="form-label text-muted small mb-1">${t('year')}</label><input type="number" class="form-control task-year" value="${task.year || new Date().getFullYear()}"></div>
                     <div class="col-4"><label class="form-label text-muted small mb-1">${t('month')}</label><input type="number" class="form-control task-month" value="${task.month || 1}"></div>
-                    <div class="col-4"><label class="form-label text-muted small mb-1">${t('day')}</label><input type="text" class="form-control task-day" value="${task.day || '1'}"></div>
+                    <div class="col-4"><label class="form-label text-muted small mb-1">${t('day')}</label><input type="number" class="form-control task-day" value="${task.day || '1'}"></div>
                 </div>
 
                 <div class="row g-2">
                     <div class="col-6">
                         <label class="form-label text-muted small mb-1">${t('time_label')}</label>
-                        <input type="text" class="form-control task-time" value="${task.time || '08:00'}">
+                        <input type="text" class="form-control task-time" value="${task.time || '08:00'}" placeholder="HH:MM">
                     </div>
                     <div class="col-6">
                         <label class="form-label text-muted small mb-1">${t('train_type')}</label>
@@ -365,9 +385,9 @@
     function addTask() {
         const lastTask = tasks[tasks.length - 1];
         tasks.push({
-            from: lastTask.from, to: lastTask.to, 
-            year: lastTask.year, month: lastTask.month, day: lastTask.day, 
-            time: "12:00", is_old_train: lastTask.is_old_train 
+            from: lastTask.from, to: lastTask.to,
+            year: lastTask.year, month: lastTask.month, day: lastTask.day,
+            time: "12:00", is_old_train: lastTask.is_old_train
         });
         renderTasks();
     }
@@ -414,24 +434,24 @@
             },
             "payment_method": document.getElementById('payment_method').value,
             "search_tasks": syncTasksFromDOM(),
-            
-            "notification": { 
-                "telegram_token": document.getElementById('tg_token').value, 
+
+            "notification": {
+                "telegram_token": document.getElementById('tg_token').value,
                 "telegram_chat_id": document.getElementById('tg_chat_id').value,
-                "heartbeat_screenshot": document.getElementById('tg_heartbeat_screenshot').checked // 🔥 保存截图选项
+                "heartbeat_screenshot": document.getElementById('tg_heartbeat_screenshot').checked
             },
-            "preferences": { 
-                "prefer_forward": document.getElementById('pref_forward').checked, 
-                "prefer_window": document.getElementById('pref_window').checked, 
-                "prefer_normal_seat": document.getElementById('pref_normal').checked, 
-                "accept_table_seat": document.getElementById('pref_table').checked 
+            "preferences": {
+                "prefer_forward": document.getElementById('pref_forward').checked,
+                "prefer_window": document.getElementById('pref_window').checked,
+                "prefer_normal_seat": document.getElementById('pref_normal').checked,
+                "accept_table_seat": document.getElementById('pref_table').checked
             },
-            
-            "bot_settings": { 
-                "bot_id": document.getElementById('bot_id').value, 
-                "chrome_port": parseInt(document.getElementById('chrome_port').value) || 9222, 
-                "heartbeat_interval": parseInt(document.getElementById('heartbeat_interval').value) || 100, 
-                "refresh_interval": parseInt(document.getElementById('refresh_interval').value) || 180 
+
+            "bot_settings": {
+                "bot_id": document.getElementById('bot_id').value,
+                "chrome_port": parseInt(document.getElementById('chrome_port').value) || 9222,
+                "heartbeat_interval": parseInt(document.getElementById('heartbeat_interval').value) || 100,
+                "refresh_interval": parseInt(document.getElementById('refresh_interval').value) || 180
             }
         };
 
@@ -439,29 +459,55 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
-        }).then(res => res.json()).then(data => alert(t('alert_saved')));
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                showToast(t('alert_saved'), 'success');
+            } else {
+                showToast(data.message || '保存失败', 'danger');
+            }
+        })
+        .catch(err => {
+            console.error('保存失败:', err);
+            showToast(t('alert_network_error'), 'danger');
+        });
     }
 
     function startBot() {
-        fetch('/api/start', { method: 'POST' }).then(res => res.json()).then(data => {
-            if(data.status === 'success') {
+        fetch('/api/start', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
                 updateStatus();
-                alert(t('alert_started'));
+                showToast(t('alert_started'), 'success');
             } else {
-                alert(t('alert_already_running'));
+                showToast(t('alert_already_running'), 'warning');
             }
+        })
+        .catch(err => {
+            console.error('启动失败:', err);
+            showToast(t('alert_network_error'), 'danger');
         });
     }
 
     function stopBot() {
-        fetch('/api/stop', { method: 'POST' }).then(res => res.json()).then(data => {
+        fetch('/api/stop', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
             updateStatus();
-            alert(t('alert_stopped'));
+            showToast(t('alert_stopped'), 'info');
+        })
+        .catch(err => {
+            console.error('停止失败:', err);
+            showToast(t('alert_network_error'), 'danger');
         });
     }
 
     function updateStatus() {
-        fetch('/api/status').then(res => res.json()).then(data => {
+        fetch('/api/status')
+        .then(res => res.json())
+        .then(data => {
             const isRunning = data.running;
             document.getElementById('status-dot').className = isRunning ? 'status-dot running' : 'status-dot stopped';
             const statusEl = document.getElementById('status-text');
@@ -469,28 +515,46 @@
             statusEl.textContent = isRunning ? t('status_running') : t('status_stopped');
             document.getElementById('btn-start').disabled = isRunning;
             document.getElementById('btn-stop').disabled = !isRunning;
+        })
+        .catch(err => {
+            console.error('获取状态失败:', err);
         });
     }
 
-    setInterval(() => {
-        fetch('/api/status').then(res => res.json()).then(data => {
-            const isRunning = data.running;
-            document.getElementById('status-dot').className = isRunning ? 'status-dot running' : 'status-dot stopped';
-            const statusEl = document.getElementById('status-text');
-            statusEl.setAttribute('data-status', isRunning ? 'running' : 'stopped');
-            statusEl.textContent = isRunning ? t('status_running') : t('status_stopped');
-            document.getElementById('btn-start').disabled = isRunning;
-            document.getElementById('btn-stop').disabled = !isRunning;
-        });
+    // 日志增量加载
+    let lastLogLine = 0;
 
-        fetch('/api/logs').then(res => res.json()).then(data => {
-            const consoleEl = document.getElementById('log-console');
-            const isScrolledToBottom = consoleEl.scrollHeight - consoleEl.clientHeight <= consoleEl.scrollTop + 10;
-            consoleEl.innerText = data.logs;
-            if(isScrolledToBottom) {
-                consoleEl.scrollTop = consoleEl.scrollHeight;
+    function pollLogs() {
+        fetch(`/api/logs?from_line=${lastLogLine}`)
+        .then(res => res.json())
+        .then(data => {
+            if (data.logs && data.logs.length > 0) {
+                const consoleEl = document.getElementById('log-console');
+                const isScrolledToBottom = consoleEl.scrollHeight - consoleEl.clientHeight <= consoleEl.scrollTop + 10;
+
+                if (lastLogLine === 0) {
+                    // 首次加载，替换全部
+                    consoleEl.innerText = data.logs;
+                } else {
+                    // 增量追加
+                    consoleEl.innerText += data.logs;
+                }
+
+                if (isScrolledToBottom) {
+                    consoleEl.scrollTop = consoleEl.scrollHeight;
+                }
             }
+            lastLogLine = data.total_lines || 0;
+        })
+        .catch(err => {
+            console.error('获取日志失败:', err);
         });
+    }
+
+    // 每 2 秒轮询状态和日志
+    setInterval(() => {
+        updateStatus();
+        pollLogs();
     }, 2000);
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
