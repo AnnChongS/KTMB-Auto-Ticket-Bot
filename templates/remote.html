@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎮 KTMB Remote Deck</title>
+    <style>
+:root{
+  --ink:#0b0d0c; --board:#121615; --board-2:#171c1a; --board-3:#1e2422;
+  --line:#2a322f; --line-2:#3a453f;
+  --enamel:#f1ece0; --muted:#8d9a92; --dim:#5f6b64;
+  --brass:#c9a227; --amber:#ffb703; --green:#2fd07f; --red:#ff5240; --blue:#3d8fd0;
+  --f-display:'Big Shoulders Display', Impact, 'Arial Narrow', sans-serif;
+  --f-body:'Archivo', 'Helvetica Neue', Arial, sans-serif;
+  --f-mono:'DM Mono', ui-monospace, Menlo, monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--ink);color:var(--enamel);font-family:var(--f-body);min-height:100vh;
+  background-image:radial-gradient(900px 500px at 80% -10%, rgba(201,162,39,.10), transparent 60%)}
+.header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 22px;
+  background:linear-gradient(180deg, rgba(30,36,34,.92), rgba(11,13,12,.92));border-bottom:2px solid var(--line)}
+.header h1{font-family:var(--f-display);font-weight:700;font-size:26px;letter-spacing:.06em;text-transform:uppercase}
+.status{padding:7px 14px;border-radius:20px;font-family:var(--f-mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;
+  border:1px solid var(--line-2);background:rgba(0,0,0,.35);color:var(--muted)}
+.status.connecting{border-color:var(--amber);color:var(--amber)}
+.status.connected{border-color:var(--green);color:var(--green)}
+.status.error{border-color:var(--red);color:var(--red)}
+.main{display:flex;height:calc(100vh - 58px)}
+.viewer{flex:1;position:relative;overflow:auto;display:flex;justify-content:center;align-items:flex-start;padding:14px;
+  background:repeating-linear-gradient(45deg, rgba(255,255,255,.012) 0 2px, transparent 2px 22px)}
+.viewer img{max-width:100%;cursor:crosshair;border:1px solid var(--line-2);border-radius:3px;box-shadow:0 18px 45px rgba(0,0,0,.6)}
+.viewer .loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-family:var(--f-mono);
+  font-size:12px;letter-spacing:.2em;color:var(--dim);text-transform:uppercase}
+.controls{width:330px;background:linear-gradient(180deg,var(--board-2),var(--board));border-left:1px solid var(--line);
+  padding:16px;overflow-y:auto}
+.control-group{margin-bottom:18px;padding-bottom:16px;border-bottom:1px dashed var(--line-2)}
+.control-group:last-child{border-bottom:none}
+.control-group h3{font-family:var(--f-display);font-size:17px;letter-spacing:.08em;text-transform:uppercase;color:var(--brass);margin-bottom:10px}
+.controls input{width:100%;font-family:var(--f-body);font-size:13px;color:var(--enamel);background:rgba(0,0,0,.45);
+  border:1px solid var(--line-2);border-radius:3px;padding:9px 11px;margin-bottom:8px}
+.controls input:focus{outline:none;border-color:var(--amber);box-shadow:0 0 0 3px rgba(255,183,3,.12)}
+.btn{width:100%;font-family:var(--f-display);font-size:17px;letter-spacing:.1em;text-transform:uppercase;
+  border:2px solid var(--line-2);background:var(--board-3);color:var(--enamel);padding:9px;border-radius:3px;cursor:pointer;transition:.15s}
+.btn:hover{border-color:var(--brass);color:var(--brass);transform:translateY(-1px)}
+.btn:active{transform:translateY(1px)}
+.btn-primary{border-color:rgba(201,162,39,.6);color:var(--brass)}
+.btn-primary:hover{background:rgba(201,162,39,.12)}
+.btn-secondary{border-color:var(--line-2);color:var(--muted)}
+.btn-success{border-color:rgba(47,208,127,.6);color:var(--green)}
+.btn-success:hover{background:rgba(47,208,127,.1)}
+.btn-warning{border-color:rgba(255,183,3,.6);color:var(--amber)}
+.btn-warning:hover{background:rgba(255,183,3,.1)}
+.log{background:#070909;border:1px solid var(--line);border-radius:3px;height:160px;overflow-y:auto;padding:10px;
+  font-family:var(--f-mono);font-size:11px;color:#b9c7bf;line-height:1.7}
+.log-entry{padding:2px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+.log-entry.error{color:var(--red)}
+.log-entry.success{color:var(--green)}
+.coord-display{position:fixed;bottom:14px;left:14px;background:rgba(0,0,0,.8);border:1px solid var(--line-2);
+  font-family:var(--f-mono);font-size:11px;color:var(--amber);padding:6px 11px;border-radius:3px;pointer-events:none}
+.quick-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.quick-actions .btn{font-size:14px;margin:0}
+</style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎮 KTMB Remote Deck</h1>
+        <span class="status connecting" id="status">连接中...</span>
+    </div>
+    
+    <div class="main">
+        <div class="viewer" id="viewer">
+            <img id="screenshot" src="" alt="等待截图...">
+            <div class="loading" id="loading">正在加载...</div>
+        </div>
+        
+        <div class="controls">
+            <div class="control-group">
+                <h3>🖱️ 点击操作</h3>
+                <p style="font-size:0.8em;color:#888;margin-bottom:8px;">点击左侧图片上的位置</p>
+                <div style="display:flex;gap:5px;">
+                    <input type="number" id="clickX" placeholder="X" style="width:50%;">
+                    <input type="number" id="clickY" placeholder="Y" style="width:50%;">
+                </div>
+                <button class="btn btn-primary" onclick="doClick()">点击该位置</button>
+            </div>
+            
+            <div class="control-group">
+                <h3>⌨️ 输入文字</h3>
+                <input type="text" id="typeText" placeholder="输入文字...">
+                <button class="btn btn-primary" onclick="doType()">输入</button>
+                <button class="btn btn-secondary" onclick="doEnter()">按回车</button>
+            </div>
+            
+            <div class="control-group">
+                <h3>🔗 导航</h3>
+                <input type="text" id="navUrl" placeholder="输入URL...">
+                <button class="btn btn-primary" onclick="doNavigate()">跳转</button>
+            </div>
+            
+            <div class="control-group">
+                <h3>🎯 快捷操作</h3>
+                <div class="quick-actions">
+                    <button class="btn btn-success" onclick="doScreenshot()">📸 截图</button>
+                    <button class="btn btn-warning" onclick="doScroll('down')">⬇️ 下滚</button>
+                    <button class="btn btn-warning" onclick="doScroll('up')">⬆️ 上滚</button>
+                    <button class="btn btn-secondary" onclick="doRefresh()">🔄 刷新</button>
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <h3>🎯 CSS选择器点击</h3>
+                <input type="text" id="selector" placeholder="例: #btnGoPaymentDuitNow">
+                <button class="btn btn-primary" onclick="doSelectorClick()">点击元素</button>
+            </div>
+            
+            <div class="control-group">
+                <h3>📋 操作日志</h3>
+                <div class="log" id="log"></div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="coord-display" id="coordDisplay"></div>
+    
+    <script>
+        const img = document.getElementById('screenshot');
+        const loading = document.getElementById('loading');
+        const status = document.getElementById('status');
+        const logDiv = document.getElementById('log');
+        const coordDisplay = document.getElementById('coordDisplay');
+        let imgNaturalW = 0, imgNaturalH = 0;
+        
+        function log(msg, type='info') {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry ' + type;
+            entry.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+            logDiv.prepend(entry);
+            if (logDiv.children.length > 50) logDiv.lastChild.remove();
+        }
+        
+        async function apiCall(endpoint, data={}) {
+            try {
+                const resp = await fetch('/api/remote/' + endpoint, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(data)
+                });
+                const result = await resp.json();
+                if (result.status === 'error') {
+                    log('❌ ' + result.message, 'error');
+                }
+                return result;
+            } catch (e) {
+                log('❌ 请求失败: ' + e.message, 'error');
+                return {status: 'error', message: e.message};
+            }
+        }
+        
+        async function refreshScreenshot() {
+            try {
+                const resp = await fetch('/api/remote/screenshot?' + Date.now());
+                if (resp.ok) {
+                    const blob = await resp.blob();
+                    img.src = URL.createObjectURL(blob);
+                    loading.style.display = 'none';
+                    status.textContent = '已连接';
+                    status.className = 'status connected';
+                }
+            } catch (e) {
+                log('截图刷新失败: ' + e.message, 'error');
+            }
+        }
+        
+        async function doClick() {
+            const x = parseInt(document.getElementById('clickX').value);
+            const y = parseInt(document.getElementById('clickY').value);
+            if (isNaN(x) || isNaN(y)) {
+                log('请输入有效的坐标', 'error');
+                return;
+            }
+            log(`点击 (${x}, ${y})...`);
+            const result = await apiCall('click', {x, y});
+            if (result.status === 'success') {
+                log('✅ 点击成功', 'success');
+                setTimeout(refreshScreenshot, 500);
+            }
+        }
+        
+        async function doType() {
+            const text = document.getElementById('typeText').value;
+            if (!text) return;
+            log(`输入: ${text}`);
+            const result = await apiCall('type', {text});
+            if (result.status === 'success') {
+                log('✅ 输入成功', 'success');
+            }
+        }
+        
+        async function doEnter() {
+            log('按回车...');
+            await apiCall('key', {key: 'Enter'});
+            setTimeout(refreshScreenshot, 300);
+        }
+        
+        async function doNavigate() {
+            const url = document.getElementById('navUrl').value;
+            if (!url) return;
+            log(`跳转: ${url}`);
+            const result = await apiCall('navigate', {url});
+            if (result.status === 'success') {
+                log('✅ 跳转成功', 'success');
+                setTimeout(refreshScreenshot, 1000);
+            }
+        }
+        
+        async function doScreenshot() {
+            log('刷新截图...');
+            await refreshScreenshot();
+            log('✅ 截图已更新', 'success');
+        }
+        
+        async function doScroll(dir) {
+            log(`${dir === 'down' ? '向下' : '向上'}滚动...`);
+            await apiCall('scroll', {direction: dir});
+            setTimeout(refreshScreenshot, 300);
+        }
+        
+        async function doRefresh() {
+            log('刷新页面...');
+            await apiCall('refresh');
+            setTimeout(refreshScreenshot, 1000);
+        }
+        
+        async function doSelectorClick() {
+            const sel = document.getElementById('selector').value;
+            if (!sel) return;
+            log(`点击元素: ${sel}`);
+            const result = await apiCall('selector_click', {selector: sel});
+            if (result.status === 'success') {
+                log('✅ 点击成功', 'success');
+                setTimeout(refreshScreenshot, 500);
+            } else {
+                log('❌ ' + result.message, 'error');
+            }
+        }
+        
+        // Click on image to set coordinates
+        img.addEventListener('click', function(e) {
+            const rect = img.getBoundingClientRect();
+            const scaleX = imgNaturalW / rect.width;
+            const scaleY = imgNaturalH / rect.height;
+            const x = Math.round((e.clientX - rect.left) * scaleX);
+            const y = Math.round((e.clientY - rect.top) * scaleY);
+            document.getElementById('clickX').value = x;
+            document.getElementById('clickY').value = y;
+            coordDisplay.style.display = 'block';
+            coordDisplay.style.left = (e.clientX + 10) + 'px';
+            coordDisplay.style.top = (e.clientY + 10) + 'px';
+            coordDisplay.textContent = `(${x}, ${y})`;
+            log(`选择坐标: (${x}, ${y})`);
+        });
+        
+        img.addEventListener('mousemove', function(e) {
+            const rect = img.getBoundingClientRect();
+            const scaleX = imgNaturalW / rect.width;
+            const scaleY = imgNaturalH / rect.height;
+            const x = Math.round((e.clientX - rect.left) * scaleX);
+            const y = Math.round((e.clientY - rect.top) * scaleY);
+            coordDisplay.style.display = 'block';
+            coordDisplay.style.left = (e.clientX + 10) + 'px';
+            coordDisplay.style.top = (e.clientY + 10) + 'px';
+            coordDisplay.textContent = `(${x}, ${y})`;
+        });
+        
+        img.addEventListener('mouseleave', function() {
+            coordDisplay.style.display = 'none';
+        });
+        
+        img.addEventListener('load', function() {
+            imgNaturalW = img.naturalWidth;
+            imgNaturalH = img.naturalHeight;
+        });
+        
+        // Initial load
+        refreshScreenshot();
+        // Auto-refresh every 3 seconds
+        setInterval(refreshScreenshot, 3000);
+        log('远程控制面板已启动');
+    </script>
+</body>
+</html>

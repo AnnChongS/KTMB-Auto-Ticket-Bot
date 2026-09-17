@@ -16,13 +16,15 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 #
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file
 import json
 import os
 import subprocess
 import sys
+import signal
 import secrets
 import logging
+from remote_control import SCREENSHOT_PATH, send_command, request_screenshot
 
 # ================= 📝 日志系统 =================
 logging.basicConfig(
@@ -34,6 +36,11 @@ logger = logging.getLogger('KTMB_Web')
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(32))
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    MAX_CONTENT_LENGTH=2 * 1024 * 1024,
+)
 
 CONFIG_FILE = "config.json"
 LOG_FILE = "bot.log"
@@ -159,9 +166,18 @@ def api_start():
         # 强制设置子进程的环境变量为 utf-8，双重保险
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
+        # 默认优先使用项目内的 browsers 目录，避免依赖全局 Playwright 缓存
+        local_browsers = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browsers")
+        if "PLAYWRIGHT_BROWSERS_PATH" not in env:
+            env["PLAYWRIGHT_BROWSERS_PATH"] = local_browsers if os.path.isdir(local_browsers) else "0"
+
+        # 直接启动 bot（Chromium headless 模式不需要显示器）
+        # 不用 xvfb-run 包裹，确保 SIGTERM 能正确传递到 Python 进程
+        cmd = [sys.executable, "-u", "ktmb_auto.py"]
+        logger.info("启动机器人")
 
         bot_process = subprocess.Popen(
-            [sys.executable, "-u", "ktmb_auto.py"],
+            cmd,
             stdout=bot_log_file_handle,
             stderr=subprocess.STDOUT,
             text=True,
@@ -178,37 +194,47 @@ def api_start():
         return jsonify({"status": "error", "message": f"启动失败: {str(e)}"}), 500
 
 
+def stop_bot(timeout=45):
+    """安全停止机器人：先 SIGTERM 让 bot 完成 KTMB 登出，超时才强杀"""
+    global bot_process, bot_log_file_handle
+    if not (bot_process and bot_process.poll() is None):
+        bot_process = None
+        return False
+
+    logger.info("正在安全停止机器人（等待登出）...")
+    bot_process.terminate()
+    try:
+        bot_process.wait(timeout=timeout)
+        logger.info("机器人进程已正常退出")
+    except subprocess.TimeoutExpired:
+        logger.warning("机器人进程未响应，已强制杀死")
+        bot_process.kill()
+        try:
+            bot_process.wait(timeout=5)
+        except Exception:
+            pass
+
+    bot_process = None
+    if bot_log_file_handle:
+        try:
+            bot_log_file_handle.close()
+        except Exception:
+            pass
+        bot_log_file_handle = None
+    return True
+
+
 @app.route('/api/stop', methods=['POST'])
 def api_stop():
     """停止机器人 API"""
-    global bot_process, bot_log_file_handle
     if not is_authenticated():
         return jsonify({"status": "error", "message": "未认证"}), 401
 
-    if bot_process and bot_process.poll() is None:
-        bot_process.terminate()
-        # 等待进程退出，超时后强制杀死
-        try:
-            bot_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            bot_process.kill()
-            logger.warning("机器人进程未响应，已强制杀死")
-
-        bot_process = None
-
-        # 关闭日志文件句柄
-        if bot_log_file_handle:
-            try:
-                bot_log_file_handle.close()
-            except Exception:
-                pass
-            bot_log_file_handle = None
-
+    if stop_bot():
         with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write("\n>>> [系统] 机器人已被强制停止！\n")
+            f.write("\n>>> [系统] 机器人已停止。\n")
         logger.info("机器人已停止")
         return jsonify({"status": "success", "message": "机器人已停止！"})
-
     return jsonify({"status": "error", "message": "机器人未运行"})
 
 
@@ -218,7 +244,6 @@ def api_status():
     if not is_authenticated():
         return jsonify({"running": False, "error": "未认证"}), 401
 
-    global bot_process
     is_running = bot_process is not None and bot_process.poll() is None
     return jsonify({"running": is_running})
 
@@ -259,15 +284,86 @@ def api_logs():
         return jsonify({"logs": f"读取日志失败: {str(e)}", "total_lines": 0, "from_line": 0}), 500
 
 
+# ================= 🎮 远程控制 =================
+
+@app.route('/remote')
+def remote_page():
+    """远程控制页面"""
+    if not is_authenticated():
+        return redirect(url_for('login_page'))
+    return render_template('remote.html')
+
+
+@app.route('/api/remote/screenshot')
+def api_remote_screenshot():
+    """获取当前浏览器截图"""
+    if not is_authenticated():
+        return jsonify({"status": "error", "message": "未认证"}), 401
+    
+    # 请求截图
+    request_screenshot()
+    
+    # 等待截图生成（最多3秒）
+    import time
+    for _ in range(15):
+        time.sleep(0.2)
+        if os.path.exists(SCREENSHOT_PATH):
+            return send_file(SCREENSHOT_PATH, mimetype='image/png')
+    
+    return jsonify({"status": "error", "message": "截图超时"}), 504
+
+
+@app.route('/api/remote/<action>', methods=['POST'])
+def api_remote_action(action):
+    """执行远程控制命令"""
+    if not is_authenticated():
+        return jsonify({"status": "error", "message": "未认证"}), 401
+    
+    data = request.json or {}
+    
+    # 发送命令给bot
+    if send_command(action, **data):
+        # 等待命令执行完成 (最多10秒)
+        import time
+        time.sleep(1)
+        return jsonify({"status": "success", "message": f"命令已发送: {action}"})
+    return jsonify({"status": "error", "message": "发送命令失败"}), 500
+
+
 # ================= 🚀 启动入口 =================
 
+def _on_shutdown_signal(signum, frame):
+    """收到 SIGTERM/SIGINT：先让机器人安全登出，再退出"""
+    try:
+        logger.info(f"[系统] 收到退出信号 ({signum})，正在停止机器人...")
+    except Exception:
+        pass
+    try:
+        stop_bot()
+    except Exception as e:
+        try:
+            logger.warning(f"[系统] 停止机器人失败: {e}")
+        except Exception:
+            pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(0)
+
+
 if __name__ == '__main__':
+    signal.signal(signal.SIGTERM, _on_shutdown_signal)
+    signal.signal(signal.SIGINT, _on_shutdown_signal)
+
     # 支持通过环境变量控制 host、port 和 debug
     host = os.environ.get('KTMB_WEB_HOST', '127.0.0.1')
     port = int(os.environ.get('KTMB_WEB_PORT', '5000'))
     debug = os.environ.get('KTMB_WEB_DEBUG', 'false').lower() == 'true'
 
     logger.info(f"Web 管理面板启动中... http://{host}:{port}")
-    logger.info(f"默认密码可通过环境变量 KTMB_WEB_PASSWORD 设置")
+    if WEB_PASSWORD == 'admin123':
+        logger.warning("正在使用默认密码 admin123，建议通过 KTMB_WEB_PASSWORD 环境变量修改！")
 
     app.run(host=host, port=port, debug=debug)

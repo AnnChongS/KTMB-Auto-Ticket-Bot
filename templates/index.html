@@ -1,562 +1,950 @@
 <!DOCTYPE html>
 <html lang="zh">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title data-i18n="page_title">KTMB 抢票指挥官 Web</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body { background-color: #f4f6f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        .card { border: none; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 20px; }
-        .card-header { background-color: #29549e; color: white; border-radius: 12px 12px 0 0 !important; font-weight: bold; }
-        .console { background-color: #1e1e1e; color: #00ff00; font-family: monospace; height: 300px; overflow-y: auto; padding: 15px; border-radius: 8px; font-size: 13px; }
-        .btn-start { background-color: #28a745; color: white; font-weight: bold; }
-        .btn-stop { background-color: #dc3545; color: white; font-weight: bold; }
-        .status-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; background-color: gray; margin-right: 8px; }
-        .running { background-color: #28a745; box-shadow: 0 0 8px #28a745; }
-        .stopped { background-color: #dc3545; }
-        .task-block { background-color: #fff; transition: all 0.3s ease; }
-        .task-block:hover { border-color: #29549e !important; box-shadow: 0 2px 8px rgba(41,84,158,0.1); }
-        .swap-btn { background-color: #f8f9fa; border: 1px solid #ced4da; color: #495057; border-radius: 50%; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: 0.2s; margin: 0 auto; }
-        .swap-btn:hover { background-color: #e2e6ea; transform: rotate(180deg); }
-        .top-bar { position: fixed; top: 15px; right: 20px; z-index: 1000; display: flex; gap: 8px; }
-        .top-btn { background: rgba(41,84,158,0.9); color: white; border: none; border-radius: 20px; padding: 6px 14px; font-size: 13px; cursor: pointer; transition: 0.2s; text-decoration: none; }
-        .top-btn:hover { background: rgba(41,84,158,1); transform: scale(1.05); color: white; }
-        .toast-container { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 9999; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KTMB 抢票指挥官 · Dispatch Console</title>
+<link rel="icon" href="/static/favicon.ico">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;700;900&family=Archivo:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#0b0d0c; --board:#121615; --board-2:#171c1a; --board-3:#1e2422;
+  --line:#2a322f; --line-2:#3a453f;
+  --enamel:#f1ece0; --muted:#8d9a92; --dim:#5f6b64;
+  --brass:#c9a227; --amber:#ffb703; --green:#2fd07f; --red:#ff5240; --blue:#3d8fd0;
+  --paper:#ece2cd; --paper-ink:#20211d;
+  --f-display:'Big Shoulders Display', Impact, 'Arial Narrow', sans-serif;
+  --f-body:'Archivo', 'Helvetica Neue', Arial, sans-serif;
+  --f-mono:'DM Mono', ui-monospace, Menlo, monospace;
+  --r:3px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:var(--ink);color:var(--enamel);font-family:var(--f-body);font-size:15px;line-height:1.5;
+  overflow-x:hidden;
+  background-image:
+    radial-gradient(1200px 600px at 15% -10%, rgba(201,162,39,.10), transparent 60%),
+    radial-gradient(900px 500px at 95% 0%, rgba(61,143,208,.08), transparent 60%);
+}
+.grain{position:fixed;inset:0;pointer-events:none;z-index:9998;opacity:.5;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.045'/%3E%3C/svg%3E");}
+.scan{position:fixed;inset:0;pointer-events:none;z-index:9997;opacity:.35;
+  background:repeating-linear-gradient(to bottom, rgba(255,255,255,.022) 0 1px, transparent 1px 3px);}
+
+.masthead{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 26px;
+  border-bottom:2px solid var(--line);background:linear-gradient(180deg, rgba(30,36,34,.92), rgba(11,13,12,.92));
+  position:sticky;top:0;z-index:100;backdrop-filter:blur(6px)}
+.brand{display:flex;align-items:center;gap:16px;min-width:0}
+.brand-mark{font-family:var(--f-display);font-weight:900;font-size:26px;letter-spacing:.08em;padding:4px 12px 6px;
+  color:var(--ink);background:var(--brass);border-radius:var(--r);box-shadow:0 0 0 2px rgba(0,0,0,.5), 4px 4px 0 rgba(201,162,39,.18)}
+h1{font-family:var(--f-display);font-weight:700;font-size:30px;letter-spacing:.04em;line-height:1;text-transform:uppercase}
+.brand-sub{font-family:var(--f-mono);font-size:11px;color:var(--dim);letter-spacing:.22em;text-transform:uppercase;margin-top:3px}
+.masthead-right{display:flex;align-items:center;gap:10px}
+.clock{font-family:var(--f-mono);font-size:15px;color:var(--amber);letter-spacing:.1em;border:1px solid var(--line);
+  padding:6px 12px;border-radius:var(--r);background:rgba(0,0,0,.35)}
+.ghost-btn{font-family:var(--f-body);font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:600;
+  color:var(--enamel);background:transparent;border:1px solid var(--line-2);padding:8px 14px;border-radius:var(--r);
+  cursor:pointer;text-decoration:none;transition:.18s}
+.ghost-btn:hover{border-color:var(--brass);color:var(--brass);transform:translateY(-1px)}
+
+.grid{display:grid;grid-template-columns:340px minmax(0,1fr);gap:22px;padding:22px 26px 120px;max-width:1560px;margin:0 auto;align-items:start}
+@media(max-width:1080px){.grid{grid-template-columns:1fr}.deck-inner{position:static;max-height:none}}
+.panel{background:linear-gradient(180deg,var(--board-2),var(--board));border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 18px;border-bottom:1px solid var(--line);background:rgba(0,0,0,.25)}
+.panel-title{font-family:var(--f-display);font-size:22px;letter-spacing:.06em;text-transform:uppercase}
+.panel-hint{font-family:var(--f-mono);font-size:11px;color:var(--dim)}
+.panel-body{padding:18px}
+.section-label{font-family:var(--f-display);font-size:18px;letter-spacing:.08em;text-transform:uppercase;color:var(--brass);
+  border-bottom:1px dashed var(--line-2);padding-bottom:6px;margin:6px 0 16px}
+
+.deck{align-self:stretch}
+.deck-inner{position:sticky;top:96px;display:flex;flex-direction:column;gap:16px;max-height:calc(100vh - 118px);overflow-y:auto;padding-right:2px}
+.deck-inner::-webkit-scrollbar{width:6px}
+.deck-inner::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:3px}
+.deck-box{background:linear-gradient(180deg,var(--board-2),var(--board));border:1px solid var(--line);border-radius:var(--r);padding:16px;position:relative;overflow:hidden}
+.deck-box::after{content:"";position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(to bottom, rgba(255,255,255,.03) 0 1px, transparent 1px 4px)}
+.deck-label{font-family:var(--f-mono);font-size:10px;letter-spacing:.32em;color:var(--dim);text-transform:uppercase;margin-bottom:10px}
+.flipboard{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px}
+.flap{font-family:var(--f-display);font-weight:900;font-size:34px;line-height:1;min-width:38px;text-align:center;
+  padding:8px 6px 10px;border-radius:2px;color:var(--ink);background:linear-gradient(180deg,#e9e3d4,#cfc7b3);
+  box-shadow:inset 0 -1px 0 rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.7), 0 2px 0 rgba(0,0,0,.5);
+  animation:flapIn .55s cubic-bezier(.2,.9,.25,1) both;animation-delay:var(--d,0ms)}
+.flap.on{color:#0b2a19;background:linear-gradient(180deg,#a8f0c6,#5fd894)}
+.flap.off{color:#2b0d09;background:linear-gradient(180deg,#ffb7ad,#ff7d6c)}
+@keyframes flapIn{0%{transform:rotateX(-90deg);opacity:0}60%{opacity:1}100%{transform:rotateX(0);opacity:1}}
+.deck-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.pill{display:inline-flex;align-items:center;gap:7px;font-family:var(--f-mono);font-size:11px;letter-spacing:.06em;
+  color:var(--muted);border:1px solid var(--line);padding:5px 9px;border-radius:20px;background:rgba(0,0,0,.3)}
+.pill b{color:var(--enamel)}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--dim);display:inline-block}
+.dot.running{background:var(--green);animation:pulse 1.8s infinite}
+.dot.stopped{background:var(--red)}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(47,208,127,.6)}70%{box-shadow:0 0 0 12px rgba(47,208,127,0)}100%{box-shadow:0 0 0 0 rgba(47,208,127,0)}}
+
+.lever{width:100%;display:flex;align-items:center;justify-content:center;gap:10px;cursor:pointer;
+  font-family:var(--f-display);font-size:23px;letter-spacing:.1em;text-transform:uppercase;padding:14px;
+  border-radius:var(--r);border:2px solid var(--line-2);background:var(--board-3);color:var(--enamel);transition:.16s;position:relative;overflow:hidden}
+.lever:active{transform:translateY(2px)}
+.lever:disabled{opacity:.32;cursor:not-allowed;filter:grayscale(.6)}
+.lever.start:hover:not(:disabled){border-color:var(--green);color:var(--green);box-shadow:0 0 0 3px rgba(47,208,127,.10)}
+.lever.stop{border-color:rgba(255,82,64,.5);color:#ffd9d3}
+.lever.stop:hover:not(:disabled){border-color:var(--red);color:var(--red);box-shadow:0 0 0 3px rgba(255,82,64,.10)}
+.lever.stop::before{content:"";position:absolute;left:0;right:0;bottom:0;height:5px;
+  background:repeating-linear-gradient(45deg,var(--red) 0 8px,transparent 8px 16px);opacity:.55}
+.deck-actions{display:flex;flex-direction:column;gap:10px;margin-top:14px}
+.deck-note{font-family:var(--f-mono);font-size:10.5px;color:var(--dim);line-height:1.6;margin-top:12px;border-left:2px solid var(--brass);padding-left:9px}
+.ticker{margin-top:14px;border-top:1px dashed var(--line-2);padding-top:10px;font-family:var(--f-mono);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden}
+.ticker-track{display:inline-block;animation:slide 30s linear infinite}
+@keyframes slide{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+
+.tab-nav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px;border-bottom:1px solid var(--line);padding-bottom:10px}
+.tab-btn{font-family:var(--f-body);font-size:12px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  background:transparent;border:1px solid transparent;color:var(--muted);padding:8px 13px;border-radius:var(--r);cursor:pointer;transition:.16s}
+.tab-btn:hover{color:var(--enamel);border-color:var(--line-2)}
+.tab-btn.active{color:var(--ink);background:var(--amber);border-color:var(--amber);box-shadow:2px 2px 0 rgba(0,0,0,.45)}
+.tab-content{display:none;animation:fadeUp .3s ease both}
+.tab-content.active{display:block}
+@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+.form-row{display:grid;gap:14px}
+.form-row.cols-2{grid-template-columns:1fr 1fr}
+.form-row.cols-3{grid-template-columns:1fr 1fr 1fr}
+@media(max-width:720px){.form-row.cols-2,.form-row.cols-3{grid-template-columns:1fr}}
+.form-group{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.form-label{font-family:var(--f-mono);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+.form-input,.form-select{font-family:var(--f-body);font-size:14px;color:var(--enamel);background:rgba(0,0,0,.4);
+  border:1px solid var(--line-2);border-radius:var(--r);padding:11px 12px;width:100%;transition:.16s}
+.form-input:focus,.form-select:focus{outline:none;border-color:var(--amber);box-shadow:0 0 0 3px rgba(255,183,3,.12)}
+.form-select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+  background-position:calc(100% - 18px) 50%,calc(100% - 13px) 50%;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+.form-input::placeholder{color:var(--dim)}
+
+.task-block{position:relative;background:var(--paper);color:var(--paper-ink);border-radius:var(--r);
+  padding:16px 18px 8px 22px;margin-bottom:16px;box-shadow:0 8px 20px rgba(0,0,0,.45), inset 0 0 0 1px rgba(0,0,0,.08);animation:fadeUp .35s ease both}
+.task-block::before{content:"";position:absolute;left:0;top:0;bottom:0;width:10px;
+  background:radial-gradient(circle at 5px 8px, var(--board) 4.5px, transparent 5px) 0 0/10px 18px repeat-y}
+.task-block .form-label{color:#6b6558}
+.task-block .form-input,.task-block .form-select{background:#fbf7ee;color:var(--paper-ink);border-color:#c9c0aa}
+.task-block .form-input:focus,.task-block .form-select:focus{border-color:var(--brass);box-shadow:0 0 0 3px rgba(201,162,39,.18)}
+.task-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.task-badge{font-family:var(--f-display);font-size:19px;letter-spacing:.1em;text-transform:uppercase;background:var(--paper-ink);color:var(--paper);padding:3px 10px 4px;border-radius:2px}
+.task-remove{background:transparent;border:1px solid #b9ae95;color:#7a715f;border-radius:50%;width:26px;height:26px;cursor:pointer;font-size:13px;transition:.15s}
+.task-remove:hover{background:var(--red);border-color:var(--red);color:#fff;transform:rotate(90deg)}
+.station-row{display:grid;grid-template-columns:1fr 40px 1fr;gap:10px;align-items:end}
+@media(max-width:720px){.station-row{grid-template-columns:1fr}}
+.swap-btn{height:42px;background:#fbf7ee;border:1px solid #c9c0aa;color:#6b6558;border-radius:var(--r);cursor:pointer;font-size:16px;transition:.15s;margin-bottom:14px}
+.swap-btn:hover{background:var(--brass);border-color:var(--brass);color:#fff;transform:scale(1.05)}
+.add-task-btn{width:100%;font-family:var(--f-display);font-size:19px;letter-spacing:.12em;text-transform:uppercase;padding:12px;
+  background:transparent;border:2px dashed var(--line-2);color:var(--muted);border-radius:var(--r);cursor:pointer;transition:.18s}
+.add-task-btn:hover{border-color:var(--amber);color:var(--amber);background:rgba(255,183,3,.05)}
+
+.ladder{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.rung{display:flex;align-items:center;gap:14px;padding:13px 15px;background:rgba(0,0,0,.25);border-bottom:1px solid var(--line)}
+.rung:last-child{border-bottom:none}
+.rung.no{opacity:.8}
+.rung-no{font-family:var(--f-display);font-size:26px;color:var(--brass);min-width:34px;line-height:1}
+.rung-body{flex:1;min-width:0}
+.rung-title{font-weight:600;font-size:14.5px}
+.rung-desc{font-family:var(--f-mono);font-size:10.5px;color:var(--dim);margin-top:2px}
+.never{font-family:var(--f-mono);font-size:10.5px;letter-spacing:.1em;color:var(--red);border:1px solid rgba(255,82,64,.5);padding:3px 8px;border-radius:20px;white-space:nowrap}
+.switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;flex:0 0 auto}
+.switch input{position:absolute;opacity:0;width:0;height:0}
+.switch .track{width:48px;height:26px;background:var(--board-3);border:1px solid var(--line-2);border-radius:20px;transition:.2s;position:relative}
+.switch .track::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:var(--dim);transition:.2s}
+.switch input:checked + .track{background:rgba(47,208,127,.18);border-color:var(--green)}
+.switch input:checked + .track::after{left:25px;background:var(--green)}
+
+.col-main{display:flex;flex-direction:column;gap:22px;min-width:0}
+.console{background:#070909;border:1px solid var(--line);border-radius:var(--r);font-family:var(--f-mono);
+  font-size:12.5px;line-height:1.65;color:#b9c7bf;padding:16px 18px;height:340px;overflow:auto;
+  background-image:repeating-linear-gradient(to bottom, rgba(255,255,255,.02) 0 1px, transparent 1px 3px)}
+.log-line{white-space:pre-wrap;word-break:break-word}
+.log-line .time{color:var(--dim)}
+.log-line .tag{color:var(--blue)}
+.log-line .info{color:var(--brass)}
+.log-line .warn{color:var(--amber)}
+.log-line .error{color:var(--red);font-weight:500}
+
+#toast-container{position:fixed;right:22px;bottom:22px;display:flex;flex-direction:column;gap:10px;z-index:9999}
+.toast{display:flex;align-items:center;gap:10px;background:var(--paper);color:var(--paper-ink);font-size:13.5px;
+  font-weight:600;padding:13px 18px;border-radius:2px;max-width:380px;box-shadow:0 10px 26px rgba(0,0,0,.5);position:relative;
+  animation:slideIn .3s cubic-bezier(.2,.9,.25,1) both;white-space:pre-line}
+.toast::before{content:"";position:absolute;left:0;top:0;bottom:0;width:6px;background:var(--brass)}
+.toast.success::before{background:var(--green)}
+.toast.error::before{background:var(--red)}
+.toast.warning::before{background:var(--amber)}
+@keyframes slideIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:none}}
+@keyframes slideOut{to{opacity:0;transform:translateX(40px)}}
+</style>
 </head>
 <body>
+<div class="grain"></div>
+<div class="scan"></div>
 
-<div class="top-bar">
-    <button class="top-btn" onclick="toggleLang()" data-i18n="lang_btn">🌐 中/EN</button>
-    <a class="top-btn" href="/logout" title="登出">🚪 登出</a>
-</div>
+<header class="masthead">
+  <div class="brand">
+    <div class="brand-mark">KTMB</div>
+    <div>
+      <h1 data-i18n="title">抢票指挥官</h1>
+      <div class="brand-sub">Dispatch Console · v1.3</div>
+    </div>
+  </div>
+  <div class="masthead-right">
+    <div class="clock" id="clock">--:--:--</div>
+    <button class="ghost-btn" onclick="toggleLang()" data-i18n="lang_btn">中/EN</button>
+    <a class="ghost-btn" href="/logout" data-i18n="logout_btn">登出</a>
+  </div>
+</header>
 
-<!-- Toast 通知容器 -->
-<div class="toast-container" id="toast-container"></div>
+<main class="grid">
+  <aside class="deck">
+   <div class="deck-inner">
+    <div class="deck-box">
+      <div class="deck-label" data-i18n="bot_status">机器人状态</div>
+      <div class="flipboard" id="status-flip"></div>
+      <div class="deck-meta">
+        <span class="pill"><i id="status-dot" class="dot stopped"></i><span id="status-text">已停止</span></span>
+        <span class="pill"><span data-i18n="refresh_label">刷新间隔</span><b id="refresh-display">180s</b></span>
+        <span class="pill"><span data-i18n="monitoring_tasks">监控任务</span><b id="task-count">0</b></span>
+      </div>
+      <div class="deck-actions">
+        <button id="btn-start" class="lever start" onclick="startBot()">&#9654; <span data-i18n="btn_start">启动抢票</span></button>
+        <button id="btn-stop" class="lever stop" onclick="stopBot()">&#9632; <span data-i18n="btn_stop">停止</span></button>
+      </div>
+      <div class="deck-note" data-i18n="deck_note">停止时机器人会先安全登出 KTMB，避免 30 分钟冷却。</div>
+      <div class="ticker"><span class="ticker-track" id="stations-ticker"></span></div>
+    </div>
+   </div>
+  </aside>
 
-<div class="container py-4">
-    <h2 class="text-center mb-4" style="color: #29549e;"><b data-i18n="title">🚄 KTMB 抢票指挥官</b></h2>
-
-    <div class="card">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <span data-i18n="live_monitor">💻 实时监控台</span>
-            <span><span id="status-dot" class="status-dot stopped"></span><span id="status-text" data-i18n="status_stopped">已停止</span></span>
+  <div class="col-main">
+  <section class="panel">
+    <div class="panel-head">
+      <div class="panel-title" data-i18n="config_title">配置中心</div>
+      <div class="panel-hint" data-i18n="config_hint">修改后请保存</div>
+    </div>
+    <div class="panel-body">
+      <form id="configForm" onsubmit="return false;">
+        <div class="tab-nav">
+          <button type="button" class="tab-btn active" onclick="switchTab(0)" data-i18n="tab_tasks">乘车计划</button>
+          <button type="button" class="tab-btn" onclick="switchTab(1)" data-i18n="tab_seat">取票偏好</button>
+          <button type="button" class="tab-btn" onclick="switchTab(2)" data-i18n="tab_account">账号付款</button>
+          <button type="button" class="tab-btn" onclick="switchTab(3)" data-i18n="tab_notify">通知</button>
+          <button type="button" class="tab-btn" onclick="switchTab(4)" data-i18n="tab_system">系统</button>
         </div>
-        <div class="card-body">
-            <div id="log-console" class="console mb-3" data-i18n="waiting">等待启动...</div>
-            <div class="d-flex gap-2">
-                <button id="btn-start" class="btn btn-start w-100" onclick="startBot()" data-i18n="btn_start">🚀 启动抢票</button>
-                <button id="btn-stop" class="btn btn-stop w-100" onclick="stopBot()" disabled data-i18n="btn_stop">🛑 停止</button>
+
+        <datalist id="stations">
+          <option value="KL SENTRAL"><option value="KLUANG"><option value="JB SENTRAL">
+          <option value="GEMAS"><option value="IPOH"><option value="BUTTERWORTH">
+          <option value="PADANG BESAR"><option value="ALOR SETAR"><option value="KUALA LUMPUR">
+          <option value="SEREMBAN"><option value="TAIPING"><option value="PENANG SENTRAL">
+        </datalist>
+
+        <div class="tab-content active" data-tab="0">
+          <div class="section-label" data-i18n="travel_plans">乘车计划 · 可添加多个时间段</div>
+          <div id="tasks-container"></div>
+          <button type="button" class="add-task-btn" onclick="addTask()">+ <span data-i18n="add_plan">添加计划</span></button>
+        </div>
+
+        <div class="tab-content" data-tab="1">
+          <div class="section-label" data-i18n="seat_prefs">取票偏好 · 优先级从上到下</div>
+          <div class="ladder">
+            <div class="rung">
+              <div class="rung-no">01</div>
+              <div class="rung-body">
+                <div class="rung-title" data-i18n="seat_aisle">靠过道</div>
+                <div class="rung-desc" data-i18n="seat_aisle_desc">最优先 (aisle seat)</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="pref_aisle" checked><span class="track"></span></label>
             </div>
+            <div class="rung">
+              <div class="rung-no">02</div>
+              <div class="rung-body">
+                <div class="rung-title" data-i18n="seat_window">靠窗</div>
+                <div class="rung-desc" data-i18n="seat_window_desc">没有过道位时的第二选择</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="pref_window" checked><span class="track"></span></label>
+            </div>
+            <div class="rung">
+              <div class="rung-no">03</div>
+              <div class="rung-body">
+                <div class="rung-title" data-i18n="seat_table">大桌位</div>
+                <div class="rung-desc" data-i18n="seat_table_desc">普通座全部售罄才会选</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="pref_table" checked><span class="track"></span></label>
+            </div>
+            <div class="rung no">
+              <div class="rung-no">04</div>
+              <div class="rung-body">
+                <div class="rung-title" data-i18n="seat_berth">卧铺</div>
+                <div class="rung-desc" data-i18n="seat_berth_desc">旧火车最后选择，默认关闭</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="pref_berth"><span class="track"></span></label>
+            </div>
+            <div class="rung no">
+              <div class="rung-no">05</div>
+              <div class="rung-body">
+                <div class="rung-title" data-i18n="seat_first">头等舱 / 商务舱</div>
+                <div class="rung-desc" data-i18n="seat_first_desc">默认关闭；打开后前面几档没位才会选</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="pref_first"><span class="track"></span></label>
+            </div>
+            <div class="rung no">
+              <div class="rung-no">06</div>
+              <div class="rung-body">
+                <div class="rung-title" data-i18n="seat_oku">OKU 无障碍座</div>
+                <div class="rung-desc" data-i18n="seat_oku_desc">默认关闭；这是给身心障碍人士预留的座位</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="pref_oku"><span class="track"></span></label>
+            </div>
+          </div>
+
+          <div class="rung" style="margin-top:16px;border:1px dashed var(--line-2);border-radius:3px">
+            <span class="never" style="color:var(--brass);border-color:rgba(201,162,39,.5)" data-i18n="seat_note_tag">说明</span>
+            <div class="rung-body">
+              <div class="rung-title" data-i18n="seat_normal">普通座优先</div>
+              <div class="rung-desc" data-i18n="seat_normal_desc">标准座永远第一优先；05/06 只有在你打开后、且前面几档都没位时才会被选</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="pref_normal" checked><span class="track"></span></label>
+          </div>
+
+          <div class="form-row cols-3" style="margin-top:16px">
+            <div class="form-group">
+              <label class="form-label" data-i18n="seat_forward">旧火车优先正向</label>
+              <label class="switch" style="padding:5px 0"><input type="checkbox" id="pref_forward" checked><span class="track"></span></label>
+            </div>
+            <div class="form-group">
+              <label class="form-label" data-i18n="seat_first_first">头等舱优先(排最前)</label>
+              <label class="switch" style="padding:5px 0"><input type="checkbox" id="pref_first_priority"><span class="track"></span></label>
+            </div>
+            <div class="form-group">
+              <label class="form-label" data-i18n="seat_blacklist">屏蔽关键词（英文逗号分隔）</label>
+              <input type="text" class="form-input" id="exclude_keywords" value="" placeholder="留空即可，例: table,berth">
+            </div>
+          </div>
         </div>
-    </div>
 
-    <div class="card">
-        <div class="card-header" data-i18n="task_config">⚙️ 任务配置 (修改后请先点击底部保存)</div>
-        <div class="card-body">
-            <form id="configForm">
-
-                <datalist id="stations">
-                    <option value="KLUANG ETS Intercity">
-                    <option value="JB SENTRAL ETS Intercity">
-                    <option value="GEMAS">
-                    <option value="KL SENTRAL">
-                </datalist>
-
-                <div class="d-flex justify-content-between align-items-center mt-2 mb-3">
-                    <h6 class="text-primary m-0" data-i18n="travel_plans">1. 乘车计划 (可添加多个时间段)</h6>
-                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="addTask()" data-i18n="add_plan">➕ 添加计划</button>
-                </div>
-
-                <div id="tasks-container"></div>
-
-                <hr>
-
-                <h6 class="text-primary" data-i18n="account_payment">2. 账号与支付</h6>
-                <div class="row g-2 mb-3">
-                    <div class="col-md-6"><label class="form-label text-muted small" data-i18n="ktmb_email">KTMB 邮箱</label><input type="email" class="form-control" id="email" value="{{ config.get('account', {}).get('email', '') }}"></div>
-                    <div class="col-md-6"><label class="form-label text-muted small" data-i18n="ktmb_password">KTMB 密码</label><input type="password" class="form-control" id="password" value="{{ config.get('account', {}).get('password', '') }}"></div>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label text-muted small" data-i18n="payment_method">支付方式</label>
-                    <select class="form-select" id="payment_method">
-                        <option value="Command" {% if config.get('payment_method') == 'Command' %}selected{% endif %} data-i18n="pay_command">Command (遥控指令 - 推荐)</option>
-                        <option value="KTM Wallet" {% if config.get('payment_method') == 'KTM Wallet' %}selected{% endif %} data-i18n="pay_wallet">KTM Wallet (自动扣款)</option>
-                        <option value="DuitNow" {% if config.get('payment_method') == 'DuitNow' %}selected{% endif %}>DuitNow</option>
-                    </select>
-                </div>
-
-                <hr>
-
-                <h6 class="text-primary" data-i18n="bot_settings">3. 机器人参数 (偏好 & 通知)</h6>
-
-                <div class="row g-2 mb-3">
-                    <div class="col-md-6"><label class="form-label text-muted small">Telegram Token</label>
-                        <input type="text" class="form-control" id="tg_token" placeholder="123456789:ABCdef..." value="{{ config.get('notification', {}).get('telegram_token', '') }}">
-                    </div>
-                    <div class="col-md-6"><label class="form-label text-muted small">Telegram Chat ID</label>
-                        <input type="text" class="form-control" id="tg_chat_id" placeholder="-1001234567890" value="{{ config.get('notification', {}).get('telegram_chat_id', '') }}">
-                    </div>
-                </div>
-
-                <div class="row g-2 mb-3">
-                    <div class="col-12">
-                        <div class="p-2 border rounded bg-light border-primary border-opacity-25">
-                            <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" id="tg_heartbeat_screenshot" {% if config.get('notification', {}).get('heartbeat_screenshot', False) %}checked{% endif %}>
-                                <label class="form-check-label text-primary small fw-bold" for="tg_heartbeat_screenshot" data-i18n="heartbeat_screenshot">
-                                    📸 存活心跳附带网页截图 (允许通过 /snap 随时截屏)
-                                </label>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="row g-2 mb-3">
-                    <div class="col-md-6">
-                        <div class="p-2 border rounded bg-light">
-                            <label class="form-label text-muted small fw-bold" data-i18n="old_train_seat">旧火车 (Intercity) 座位偏好</label>
-                            <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" id="pref_forward" {% if config.get('preferences', {}).get('prefer_forward', True) %}checked{% endif %}>
-                                <label class="form-check-label text-muted small" for="pref_forward" data-i18n="seat_forward">正向座位 (Forward)</label>
-                            </div>
-                            <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" id="pref_window" {% if config.get('preferences', {}).get('prefer_window', True) %}checked{% endif %}>
-                                <label class="form-check-label text-muted small" for="pref_window" data-i18n="seat_window">靠窗优先 (Window)</label>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-6">
-                        <div class="p-2 border rounded bg-light">
-                            <label class="form-label text-muted small fw-bold" data-i18n="new_train_seat">新火车 (ETS) 座位偏好</label>
-                            <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" id="pref_normal" {% if config.get('preferences', {}).get('prefer_normal_seat', True) %}checked{% endif %}>
-                                <label class="form-check-label text-muted small" for="pref_normal" data-i18n="seat_normal">普通座位 (Normal Seat)</label>
-                            </div>
-                            <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" id="pref_table" {% if config.get('preferences', {}).get('accept_table_seat', True) %}checked{% endif %}>
-                                <label class="form-check-label text-muted small" for="pref_table" data-i18n="seat_table">接受大桌位 (Table Seat)</label>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <hr>
-
-                <h6 class="text-primary" data-i18n="sys_params">4. 核心系统参数 (Advanced)</h6>
-                <div class="row g-2 mb-3">
-                    <div class="col-md-3 col-6">
-                        <label class="form-label text-muted small" data-i18n="bot_id">Bot ID (编号)</label>
-                        <input type="text" class="form-control" id="bot_id" value="{{ config.get('bot_settings', {}).get('bot_id', '1') }}">
-                    </div>
-                    <div class="col-md-3 col-6">
-                        <label class="form-label text-muted small" data-i18n="chrome_port">Chrome 端口</label>
-                        <input type="number" class="form-control" id="chrome_port" value="{{ config.get('bot_settings', {}).get('chrome_port', 9222) }}">
-                    </div>
-                    <div class="col-md-3 col-6">
-                        <label class="form-label text-muted small" data-i18n="heartbeat_interval">心跳间隔 (轮次)</label>
-                        <input type="number" class="form-control" id="heartbeat_interval" value="{{ config.get('bot_settings', {}).get('heartbeat_interval', 100) }}">
-                    </div>
-                    <div class="col-md-3 col-6">
-                        <label class="form-label text-muted small" data-i18n="refresh_interval">刷票间隔 (秒)</label>
-                        <input type="number" class="form-control" id="refresh_interval" value="{{ config.get('bot_settings', {}).get('refresh_interval', 180) }}">
-                    </div>
-                </div>
-
-                <button type="button" class="btn btn-primary w-100 mt-3 py-2 fw-bold" onclick="saveConfig()" data-i18n="save_all">💾 保存所有配置</button>
-            </form>
+        <div class="tab-content" data-tab="2">
+          <div class="section-label" data-i18n="account_payment">账号与支付</div>
+          <div class="form-row cols-2">
+            <div class="form-group">
+              <label class="form-label" data-i18n="ktmb_email">KTMB 邮箱</label>
+              <input type="email" class="form-input" id="email" value="{{ config.get('account', {}).get('email', '') }}" placeholder="your@email.com">
+            </div>
+            <div class="form-group">
+              <label class="form-label" data-i18n="ktmb_password">KTMB 密码</label>
+              <input type="password" class="form-input" id="password" value="{{ config.get('account', {}).get('password', '') }}" placeholder="password">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" data-i18n="payment_method">支付方式</label>
+            <select class="form-select" id="payment_method">
+              <option value="Command" {% if config.get('payment_method') == 'Command' %}selected{% endif %} data-i18n="pay_command">Command (遥控指令 - 推荐)</option>
+              <option value="KTM Wallet" {% if config.get('payment_method') == 'KTM Wallet' %}selected{% endif %} data-i18n="pay_wallet">KTM Wallet (自动扣款)</option>
+              <option value="DuitNow" {% if config.get('payment_method') == 'DuitNow' %}selected{% endif %}>DuitNow</option>
+            </select>
+          </div>
         </div>
-    </div>
-</div>
 
+        <div class="tab-content" data-tab="3">
+          <div class="section-label" data-i18n="tab_notify">Telegram 通知</div>
+          <div class="form-row cols-2">
+            <div class="form-group">
+              <label class="form-label">Bot Token</label>
+              <input type="text" class="form-input" id="tg_token" placeholder="123456789:ABCdef..." value="{{ config.get('notification', {}).get('telegram_token', '') }}">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Chat ID</label>
+              <input type="text" class="form-input" id="tg_chat_id" placeholder="-1001234567890" value="{{ config.get('notification', {}).get('telegram_chat_id', '') }}">
+            </div>
+          </div>
+          <div class="rung" style="border:1px solid var(--line);border-radius:3px">
+            <div class="rung-body">
+              <div class="rung-title" data-i18n="heartbeat_screenshot">心跳附带截图</div>
+              <div class="rung-desc">/snap anytime</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="tg_heartbeat_screenshot" {% if config.get('notification', {}).get('heartbeat_screenshot', False) %}checked{% endif %}><span class="track"></span></label>
+          </div>
+        </div>
+
+        <div class="tab-content" data-tab="4">
+          <div class="section-label" data-i18n="sys_params">核心系统参数</div>
+          <div class="form-row cols-2">
+            <div class="form-group">
+              <label class="form-label" data-i18n="bot_id">Bot ID</label>
+              <input type="text" class="form-input" id="bot_id" value="{{ config.get('bot_settings', {}).get('bot_id', '1') }}">
+            </div>
+            <div class="form-group">
+              <label class="form-label" data-i18n="chrome_port">Chrome 调试端口</label>
+              <input type="number" class="form-input" id="chrome_port" value="{{ config.get('bot_settings', {}).get('chrome_port', 9222) }}">
+            </div>
+            <div class="form-group">
+              <label class="form-label" data-i18n="heartbeat_interval">心跳间隔 (轮)</label>
+              <input type="number" class="form-input" id="heartbeat_interval" value="{{ config.get('bot_settings', {}).get('heartbeat_interval', 100) }}">
+            </div>
+            <div class="form-group">
+              <label class="form-label" data-i18n="refresh_interval">刷票间隔 (秒)</label>
+              <input type="number" class="form-input" id="refresh_interval" value="{{ config.get('bot_settings', {}).get('refresh_interval', 180) }}">
+            </div>
+          </div>
+          <div class="deck-note" data-i18n="sys_note">机器人默认使用自带 headless Chromium；若本机已开启 Chrome 调试端口则优先接管。</div>
+        </div>
+
+        <button type="button" class="lever start" style="margin-top:20px" onclick="saveConfig()">&#128190; <span data-i18n="save_all">保存所有配置</span></button>
+      </form>
+    </div>
+  </section>
+
+  <section class="panel">
+      <div class="panel-head">
+        <div class="panel-title" data-i18n="live_monitor">实时监控台</div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="panel-hint" data-i18n="autoscroll">自动滚动</span>
+          <label class="switch"><input type="checkbox" id="autoscroll" checked><span class="track"></span></label>
+          <button type="button" class="ghost-btn" onclick="clearConsole()" data-i18n="clear_log">清空</button>
+        </div>
+      </div>
+      <div class="console" id="log-console"></div>
+  </section>
+  </div>
+</main>
+<div id="toast-container"></div>
 <script>
-    // ==================== Toast 通知系统 ====================
-    function showToast(message, type = 'success') {
-        const container = document.getElementById('toast-container');
-        const toast = document.createElement('div');
-        toast.className = `toast align-items-center text-bg-${type} border-0 show`;
-        toast.setAttribute('role', 'alert');
-        toast.innerHTML = `
-            <div class="d-flex">
-                <div class="toast-body">${message}</div>
-                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
-            </div>
-        `;
-        container.appendChild(toast);
-        setTimeout(() => {
-            toast.classList.remove('show');
-            setTimeout(() => toast.remove(), 300);
-        }, 3000);
+// ============================================================
+//  KTMB Dispatch Console - panel logic
+// ============================================================
+var i18nDict = {
+  zh: {
+    page_title: 'KTMB 抢票指挥官',
+    title: '抢票指挥官',
+    lang_btn: '中/EN',
+    logout_btn: '登出',
+    bot_status: '机器人状态',
+    status_stopped: '已停止',
+    status_running: '运行中',
+    monitoring_tasks: '监控任务',
+    refresh_label: '刷新间隔',
+    live_monitor: '实时监控台',
+    clear_log: '清空',
+    autoscroll: '自动滚动',
+    waiting: '等待启动...',
+    btn_start: '启动抢票',
+    btn_stop: '停止',
+    deck_note: '停止时机器人会先安全登出 KTMB，避免 30 分钟冷却。',
+    config_title: '配置中心',
+    config_hint: '修改后请保存',
+    tab_tasks: '乘车计划',
+    tab_seat: '取票偏好',
+    tab_account: '账号付款',
+    tab_notify: '通知',
+    tab_system: '系统',
+    travel_plans: '乘车计划 · 可添加多个时间段',
+    add_plan: '添加计划',
+    account_payment: '账号与支付',
+    ktmb_email: 'KTMB 邮箱',
+    ktmb_password: 'KTMB 密码',
+    payment_method: '支付方式',
+    pay_command: 'Command (遥控指令 - 推荐)',
+    pay_wallet: 'KTM Wallet (自动扣款)',
+    heartbeat_screenshot: '心跳附带截图',
+    seat_prefs: '取票偏好 · 优先级从上到下',
+    seat_aisle: '靠过道',
+    seat_aisle_desc: '最优先 (aisle seat)',
+    seat_window: '靠窗',
+    seat_window_desc: '没有过道位时的第二选择',
+    seat_table: '大桌位',
+    seat_table_desc: '普通座全部售罄才会选',
+    seat_berth: '卧铺',
+    seat_berth_desc: '旧火车最后选择，默认关闭',
+    seat_first: '头等舱 / 商务舱',
+    seat_first_desc: '默认关闭；打开后前面几档没位才会选',
+    seat_first_first: '头等舱优先(排最前)',
+    seat_oku: 'OKU 无障碍座',
+    seat_oku_desc: '默认关闭；这是给身心障碍人士预留的座位',
+    seat_note_tag: '说明',
+    seat_normal: '普通座优先',
+    seat_normal_desc: '标准座永远第一优先；05/06 只有打开且前面都没位时才会被选',
+    seat_forward: '旧火车优先正向',
+    seat_blacklist: '屏蔽关键词（英文逗号分隔）',
+    sys_params: '核心系统参数',
+    sys_note: '机器人默认使用自带 headless Chromium；若本机已开启 Chrome 调试端口则优先接管。',
+    bot_id: 'Bot ID',
+    chrome_port: 'Chrome 调试端口',
+    heartbeat_interval: '心跳间隔 (轮)',
+    refresh_interval: '刷票间隔 (秒)',
+    save_all: '保存所有配置',
+    from_station: '出发站',
+    to_station: '到达站',
+    year: '年',
+    month: '月',
+    day: '日',
+    time_label: '时间 (HH:MM)',
+    train_type: '火车类型',
+    train_auto: '自动检测 (推荐)',
+    train_old: '旧火车 Intercity',
+    train_new: '新火车 ETS',
+    delete_plan_title: '删除此计划',
+    swap_stations_title: '对换出发/到达站',
+    monitor_plan: '监控计划',
+    alert_saved: '配置已保存！',
+    alert_started: '机器人已启动！',
+    alert_stopped: '机器人已停止！',
+    alert_already_running: '机器人已经在运行中！',
+    alert_network_error: '网络错误，请检查连接',
+    err_station_required: '出发/到达站不能为空',
+    err_date_invalid: '日期无效',
+    err_date_past: '日期已过期，请选择未来日期',
+    err_time_format: '时间格式应为 HH:MM'
+  },
+  en: {
+    page_title: 'KTMB Ticket Commander',
+    title: 'Ticket Commander',
+    lang_btn: 'EN/中',
+    logout_btn: 'Logout',
+    bot_status: 'Bot Status',
+    status_stopped: 'STOPPED',
+    status_running: 'RUNNING',
+    monitoring_tasks: 'Tasks',
+    refresh_label: 'Refresh',
+    live_monitor: 'Live Monitor',
+    clear_log: 'Clear',
+    autoscroll: 'Auto scroll',
+    waiting: 'Waiting to start...',
+    btn_start: 'Start Bot',
+    btn_stop: 'Stop',
+    deck_note: 'Stopping always logs out of KTMB first, avoiding the 30-minute cooldown.',
+    config_title: 'Configuration',
+    config_hint: 'Save after changes',
+    tab_tasks: 'Trips',
+    tab_seat: 'Seats',
+    tab_account: 'Account',
+    tab_notify: 'Alerts',
+    tab_system: 'System',
+    travel_plans: 'Travel Plans - add as many as you need',
+    add_plan: 'Add Plan',
+    account_payment: 'Account and Payment',
+    ktmb_email: 'KTMB Email',
+    ktmb_password: 'KTMB Password',
+    payment_method: 'Payment Method',
+    pay_command: 'Command (remote instruction - recommended)',
+    pay_wallet: 'KTM Wallet (auto debit)',
+    heartbeat_screenshot: 'Heartbeat with screenshot',
+    seat_prefs: 'Seat Preference - priority top to bottom',
+    seat_aisle: 'Aisle',
+    seat_aisle_desc: 'Highest priority',
+    seat_window: 'Window',
+    seat_window_desc: 'Second choice when no aisle seat',
+    seat_table: 'Table / cluster',
+    seat_table_desc: 'Only when all normal seats are gone',
+    seat_berth: 'Berth',
+    seat_berth_desc: 'Old trains, last resort (off by default)',
+    seat_first: 'First / Business class',
+    seat_first_desc: 'Off by default; used only when higher tiers have no seat',
+    seat_first_first: 'First class first',
+    seat_oku: 'OKU accessible seat',
+    seat_oku_desc: 'Off by default; reserved for passengers with disabilities',
+    seat_note_tag: 'NOTE',
+    seat_normal: 'Prefer normal seats',
+    seat_normal_desc: 'Standard seats always come first; 05/06 only when enabled and nothing above is free',
+    seat_forward: 'Prefer forward facing (old trains)',
+    seat_blacklist: 'Blocked keywords (comma separated)',
+    sys_params: 'System Parameters',
+    sys_note: 'The bot uses its own headless Chromium; if a Chrome debug port is open it takes over that browser.',
+    bot_id: 'Bot ID',
+    chrome_port: 'Chrome Debug Port',
+    heartbeat_interval: 'Heartbeat (rounds)',
+    refresh_interval: 'Refresh (sec)',
+    save_all: 'Save All Settings',
+    from_station: 'From',
+    to_station: 'To',
+    year: 'Year',
+    month: 'Month',
+    day: 'Day',
+    time_label: 'Time (HH:MM)',
+    train_type: 'Train type',
+    train_auto: 'Auto detect (recommended)',
+    train_old: 'Old train (Intercity)',
+    train_new: 'New train (ETS)',
+    delete_plan_title: 'Delete this plan',
+    swap_stations_title: 'Swap from / to',
+    monitor_plan: 'Plan',
+    alert_saved: 'Settings saved!',
+    alert_started: 'Bot started!',
+    alert_stopped: 'Bot stopped!',
+    alert_already_running: 'The bot is already running!',
+    alert_network_error: 'Network error, check your connection',
+    err_station_required: 'From / To station is required',
+    err_date_invalid: 'Invalid date',
+    err_date_past: 'Date is in the past, pick a future date',
+    err_time_format: 'Time format should be HH:MM'
+  }
+};
+
+var lang = localStorage.getItem('ktmb_lang') || 'zh';
+var tasks = {{ config.get('search_tasks', [{}]) | tojson | safe }};
+var prefs = {{ config.get('preferences', {}) | tojson | safe }};
+var lastLogLine = 0;
+var lastStatus = null;
+
+function t(key) {
+  var d = i18nDict[lang] || {};
+  return d[key] || i18nDict.zh[key] || key;
+}
+function esc(v) {
+  return String(v === undefined || v === null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function showToast(message, type) {
+  type = type || 'success';
+  var icons = { success: '\u2705', error: '\u274C', info: '\u2139\uFE0F', warning: '\u26A0\uFE0F' };
+  var container = document.getElementById('toast-container');
+  var toast = document.createElement('div');
+  toast.className = 'toast ' + type;
+  toast.innerHTML = '<span>' + (icons[type] || '') + '</span><span>' + esc(message) + '</span>';
+  container.appendChild(toast);
+  setTimeout(function () {
+    toast.style.animation = 'slideOut 0.3s ease forwards';
+    setTimeout(function () { toast.remove(); }, 300);
+  }, 4000);
+}
+
+// ==================== tabs / i18n ====================
+function switchTab(idx) {
+  document.querySelectorAll('.tab-btn').forEach(function (btn, i) {
+    btn.classList.toggle('active', i === idx);
+  });
+  document.querySelectorAll('.tab-content').forEach(function (content, i) {
+    content.classList.toggle('active', i === idx);
+  });
+}
+function applyI18n() {
+  document.querySelectorAll('[data-i18n]').forEach(function (el) {
+    var k = el.getAttribute('data-i18n');
+    var v = (i18nDict[lang] || {})[k];
+    if (v) el.textContent = v;
+  });
+  document.documentElement.lang = (lang === 'zh') ? 'zh' : 'en';
+  document.title = t('page_title');
+  renderTasks();
+  if (lastStatus !== null) applyStatus(lastStatus);
+}
+function toggleLang() {
+  lang = (lang === 'zh') ? 'en' : 'zh';
+  localStorage.setItem('ktmb_lang', lang);
+  applyI18n();
+}
+
+// ==================== logs ====================
+function colorizeLog(text) {
+  return text.split('\n').map(function (line) {
+    if (!line.trim()) return '';
+    var colored = line
+      .replace(/(\d{2}:\d{2}:\d{2})/g, '<span class="time">$1</span>')
+      .replace(/(\[\u9519\u8BEF\]|\[\u81F4\u547D\u5F02\u5E38\]|\[\u5F02\u5E38\])/g, '<span class="error">$1</span>')
+      .replace(/(\[\u8B66\u544A\]|\[\u4E2D\u65AD\]|\[\u5931\u8D25\])/g, '<span class="warn">$1</span>')
+      .replace(/(\[\u7CFB\u7EDF\]|\[\u6210\u529F\]|\[\u5B8C\u6210\])/g, '<span class="info">$1</span>')
+      .replace(/(\[(?:ERROR|WARNING|INFO)\]|\[\u641C\u7D22\]|\[\u8FDE\u63A5\]|\[\u5BFC\u822A\]|\[\u64CD\u4F5C\]|\[\u9009\u5EA7\]|\[\u8FDB\u5EA6\]|\[\u4F11\u606F\]|\[\u6307\u4EE4\]|\[\u586B\u8868\]|\[\u4ED8\u6B3E\]|\[\u8BA2\u5EA7\]|\[\u9875\u9762\]|\[\u8BA1\u5212\]|\[\u4F69\u989D\])/g, '<span class="tag">$1</span>');
+    return '<div class="log-line">' + colored + '</div>';
+  }).join('');
+}
+function clearConsole() {
+  document.getElementById('log-console').innerHTML = '';
+  lastLogLine = 0;
+}
+
+// ==================== tasks ====================
+function renderTasks() {
+  var container = document.getElementById('tasks-container');
+  if (!container) return;
+  container.innerHTML = '';
+  document.getElementById('task-count').textContent = tasks.length;
+
+  tasks.forEach(function (task, index) {
+    var mode = task.train_mode;
+    if (mode !== 'auto' && mode !== 'old' && mode !== 'new') {
+      mode = (task.is_old_train === true) ? 'old' : (task.is_old_train === false ? 'new' : 'auto');
     }
+    var opts = '';
+    ['auto', 'old', 'new'].forEach(function (m) {
+      opts += '<option value="' + m + '"' + (mode === m ? ' selected' : '') + '>' + esc(t('train_' + m)) + '</option>';
+    });
+    var html = ''
+      + '<div class="task-block" data-index="' + index + '">'
+      +   '<div class="task-header">'
+      +     '<span class="task-badge">' + esc(t('monitor_plan')) + ' ' + (index + 1) + '</span>'
+      +     (tasks.length > 1 ? '<button type="button" class="task-remove" onclick="removeTask(' + index + ')" title="' + esc(t('delete_plan_title')) + '">&#10005;</button>' : '')
+      +   '</div>'
+      +   '<div class="station-row">'
+      +     '<div class="form-group"><label class="form-label">' + esc(t('from_station')) + '</label>'
+      +       '<input type="text" class="form-input station-from" list="stations" value="' + esc(task.from) + '"></div>'
+      +     '<button type="button" class="swap-btn" onclick="swapStation(' + index + ')" title="' + esc(t('swap_stations_title')) + '">&#8646;</button>'
+      +     '<div class="form-group"><label class="form-label">' + esc(t('to_station')) + '</label>'
+      +       '<input type="text" class="form-input station-to" list="stations" value="' + esc(task.to) + '"></div>'
+      +   '</div>'
+      +   '<div class="form-row cols-3">'
+      +     '<div class="form-group"><label class="form-label">' + esc(t('year')) + '</label>'
+      +       '<input type="number" class="form-input task-year" value="' + esc(task.year || new Date().getFullYear()) + '"></div>'
+      +     '<div class="form-group"><label class="form-label">' + esc(t('month')) + '</label>'
+      +       '<input type="number" class="form-input task-month" value="' + esc(task.month || 1) + '"></div>'
+      +     '<div class="form-group"><label class="form-label">' + esc(t('day')) + '</label>'
+      +       '<input type="number" class="form-input task-day" value="' + esc(task.day || 1) + '"></div>'
+      +   '</div>'
+      +   '<div class="form-row cols-2">'
+      +     '<div class="form-group"><label class="form-label">' + esc(t('time_label')) + '</label>'
+      +       '<input type="text" class="form-input task-time" value="' + esc(task.time || '08:00') + '" placeholder="HH:MM"></div>'
+      +     '<div class="form-group"><label class="form-label">' + esc(t('train_type')) + '</label>'
+      +       '<select class="form-select task-type">' + opts + '</select></div>'
+      +   '</div>'
+      + '</div>';
+    container.insertAdjacentHTML('beforeend', html);
+  });
 
-    // ==================== i18n System ====================
-    const i18nDict = {
-        zh: {
-            page_title: 'KTMB 抢票指挥官 Web',
-            lang_btn: '🌐 中/EN',
-            title: '🚄 KTMB 抢票指挥官',
-            live_monitor: '💻 实时监控台',
-            status_stopped: '已停止',
-            status_running: '正在运行',
-            waiting: '等待启动...',
-            btn_start: '🚀 启动抢票',
-            btn_stop: '🛑 停止',
-            task_config: '⚙️ 任务配置 (修改后请先点击底部保存)',
-            travel_plans: '1. 乘车计划 (可添加多个时间段)',
-            add_plan: '➕ 添加计划',
-            account_payment: '2. 账号与支付',
-            ktmb_email: 'KTMB 邮箱',
-            ktmb_password: 'KTMB 密码',
-            payment_method: '支付方式',
-            pay_command: 'Command (遥控指令 - 推荐)',
-            pay_wallet: 'KTM Wallet (自动扣款)',
-            bot_settings: '3. 机器人参数 (偏好 & 通知)',
-            heartbeat_screenshot: '📸 存活心跳附带网页截图 (允许通过 /snap 随时截屏)',
-            old_train_seat: '旧火车 (Intercity) 座位偏好',
-            seat_forward: '正向座位 (Forward)',
-            seat_window: '靠窗优先 (Window)',
-            new_train_seat: '新火车 (ETS) 座位偏好',
-            seat_normal: '普通座位 (Normal Seat)',
-            seat_table: '接受大桌位 (Table Seat)',
-            sys_params: '4. 核心系统参数 (Advanced)',
-            bot_id: 'Bot ID (编号)',
-            chrome_port: 'Chrome 端口',
-            heartbeat_interval: '心跳间隔 (轮次)',
-            refresh_interval: '刷票间隔 (秒)',
-            save_all: '💾 保存所有配置',
-            from_station: '出发站',
-            to_station: '到达站',
-            year: '年',
-            month: '月',
-            day: '日',
-            time_label: '时间 (HH:MM)',
-            train_type: '火车类型',
-            old_train: '旧火车 (Intercity)',
-            new_train: '新火车 (ETS)',
-            delete_plan_title: '删除此计划',
-            swap_stations_title: '对换出发/到达站',
-            monitor_plan: '监控计划',
-            alert_saved: '✅ 配置已保存！',
-            alert_started: '✅ 机器人已启动！',
-            alert_stopped: '✅ 机器人已停止！',
-            alert_already_running: '⚠️ 机器人已经在运行中！',
-            alert_network_error: '❌ 网络错误，请检查连接'
-        },
-        en: {
-            page_title: 'KTMB Ticket Commander Web',
-            lang_btn: '🌐 中/EN',
-            title: '🚄 KTMB Ticket Commander',
-            live_monitor: '💻 Live Monitor',
-            status_stopped: 'Stopped',
-            status_running: 'Running',
-            waiting: 'Waiting to start...',
-            btn_start: '🚀 Start Bot',
-            btn_stop: '🛑 Stop',
-            task_config: '⚙️ Task Config (Click Save at bottom after changes)',
-            travel_plans: '1. Travel Plans (add multiple schedules)',
-            add_plan: '➕ Add Plan',
-            account_payment: '2. Account & Payment',
-            ktmb_email: 'KTMB Email',
-            ktmb_password: 'KTMB Password',
-            payment_method: 'Payment Method',
-            pay_command: 'Command (Remote - Recommended)',
-            pay_wallet: 'KTM Wallet (Auto Pay)',
-            bot_settings: '3. Bot Settings (Preferences & Notifications)',
-            heartbeat_screenshot: '📸 Heartbeat with screenshot (use /snap anytime)',
-            old_train_seat: 'Old Train (Intercity) Seat Prefs',
-            seat_forward: 'Forward Facing',
-            seat_window: 'Window Seat',
-            new_train_seat: 'New Train (ETS) Seat Prefs',
-            seat_normal: 'Normal Seat',
-            seat_table: 'Accept Table Seat',
-            sys_params: '4. System Parameters (Advanced)',
-            bot_id: 'Bot ID',
-            chrome_port: 'Chrome Port',
-            heartbeat_interval: 'Heartbeat Interval (rounds)',
-            refresh_interval: 'Refresh Interval (sec)',
-            save_all: '💾 Save All Settings',
-            from_station: 'From Station',
-            to_station: 'To Station',
-            year: 'Year',
-            month: 'Month',
-            day: 'Day',
-            time_label: 'Time (HH:MM)',
-            train_type: 'Train Type',
-            old_train: 'Old Train (Intercity)',
-            new_train: 'New Train (ETS)',
-            delete_plan_title: 'Delete this plan',
-            swap_stations_title: 'Swap stations',
-            monitor_plan: 'Monitor Plan',
-            alert_saved: '✅ Settings saved!',
-            alert_started: '✅ Bot started!',
-            alert_stopped: '✅ Bot stopped!',
-            alert_already_running: '⚠️ Bot is already running!',
-            alert_network_error: '❌ Network error, please check connection'
-        }
-    };
+  var ticker = document.getElementById('stations-ticker');
+  if (ticker) {
+    var text = tasks.map(function (tk) { return (tk.from || '?') + ' \u2192 ' + (tk.to || '?'); }).join('   \u2022   ');
+    ticker.textContent = '   ' + text + '   \u2022   ' + text + '   ';
+  }
+}
+function addTask() {
+  syncTasksFromDOM();
+  var last = tasks[tasks.length - 1] || {};
+  tasks.push({
+    from: last.from || '', to: last.to || '',
+    year: last.year || new Date().getFullYear(), month: last.month || 1, day: last.day || 1,
+    time: '12:00', train_mode: last.train_mode || 'auto'
+  });
+  renderTasks();
+}
+function removeTask(index) {
+  syncTasksFromDOM();
+  tasks.splice(index, 1);
+  renderTasks();
+}
+function swapStation(index) {
+  var block = document.querySelectorAll('.task-block')[index];
+  if (!block) return;
+  var fromInput = block.querySelector('.station-from');
+  var toInput = block.querySelector('.station-to');
+  var tmp = fromInput.value;
+  fromInput.value = toInput.value;
+  toInput.value = tmp;
+}
+function syncTasksFromDOM() {
+  var result = [];
+  document.querySelectorAll('.task-block').forEach(function (block, idx) {
+    result.push({
+      from: block.querySelector('.station-from').value,
+      to: block.querySelector('.station-to').value,
+      year: parseInt(block.querySelector('.task-year').value, 10) || new Date().getFullYear(),
+      month: parseInt(block.querySelector('.task-month').value, 10) || 1,
+      day: block.querySelector('.task-day').value || '1',
+      time: block.querySelector('.task-time').value || '00:00',
+      train_mode: block.querySelector('.task-type').value || 'auto',
+      type: t('monitor_plan') + ' ' + (idx + 1)
+    });
+  });
+  tasks = result;
+  return result;
+}
+function validateTasks(list) {
+  var problems = [];
+  var today = new Date();
+  today.setHours(0, 0, 0, 0);
+  list.forEach(function (tk, i) {
+    var idx = i + 1;
+    if (!tk.from || !tk.to) problems.push('#' + idx + ': ' + t('err_station_required'));
+    var d = new Date(tk.year, tk.month - 1, parseInt(tk.day, 10));
+    if (isNaN(d.getTime())) problems.push('#' + idx + ': ' + t('err_date_invalid'));
+    else if (d < today) problems.push('#' + idx + ': ' + t('err_date_past') + ' (' + tk.year + '-' + tk.month + '-' + tk.day + ')');
+    if (!/^\d{1,2}:\d{2}$/.test(tk.time)) problems.push('#' + idx + ': ' + t('err_time_format'));
+  });
+  return problems;
+}
 
-    let currentLang = localStorage.getItem('ktmb_lang') || 'zh';
+// ==================== preferences ====================
+function applyPrefs() {
+  var map = {
+    pref_normal: 'prefer_normal_seat',
+    pref_aisle: 'prefer_aisle',
+    pref_window: 'prefer_window',
+    pref_table: 'accept_table_seat',
+    pref_berth: 'accept_berth',
+    pref_first: 'accept_first_class',
+    pref_first_priority: 'prefer_first_class',
+    pref_oku: 'accept_oku',
+    pref_forward: 'prefer_forward'
+  };
+  Object.keys(map).forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    var v = prefs[map[id]];
+    if (v === undefined) v = (id !== 'pref_berth' && id !== 'pref_first' && id !== 'pref_oku' && id !== 'pref_first_priority');
+    el.checked = !!v;
+  });
+  var kw = document.getElementById('exclude_keywords');
+  if (kw) {
+    var list = prefs.exclude_seat_keywords || [];
+    kw.value = list.join(',');
+  }
+}
 
-    function t(key) {
-        return (i18nDict[currentLang] && i18nDict[currentLang][key]) || (i18nDict['zh'][key]) || key;
+// ==================== API ====================
+function checkAuth(res) {
+  if (res.status === 401) { window.location.href = '/login'; return null; }
+  return res;
+}
+function saveConfig() {
+  var taskList = syncTasksFromDOM();
+  var problems = validateTasks(taskList);
+  if (problems.length) {
+    showToast(problems.join('\n'), 'warning');
+    return;
+  }
+  var keywords = (document.getElementById('exclude_keywords').value || '')
+    .split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 0; });
+
+  var data = {
+    account: {
+      email: document.getElementById('email').value,
+      password: document.getElementById('password').value
+    },
+    payment_method: document.getElementById('payment_method').value,
+    search_tasks: taskList,
+    notification: {
+      telegram_token: document.getElementById('tg_token').value,
+      telegram_chat_id: document.getElementById('tg_chat_id').value,
+      heartbeat_screenshot: document.getElementById('tg_heartbeat_screenshot').checked
+    },
+    preferences: {
+      prefer_normal_seat: document.getElementById('pref_normal').checked,
+      prefer_aisle: document.getElementById('pref_aisle').checked,
+      prefer_window: document.getElementById('pref_window').checked,
+      prefer_forward: document.getElementById('pref_forward').checked,
+      accept_table_seat: document.getElementById('pref_table').checked,
+      accept_berth: document.getElementById('pref_berth').checked,
+      accept_first_class: document.getElementById('pref_first').checked,
+      prefer_first_class: document.getElementById('pref_first_priority').checked,
+      accept_oku: document.getElementById('pref_oku').checked,
+      exclude_seat_keywords: keywords
+    },
+    bot_settings: {
+      bot_id: document.getElementById('bot_id').value,
+      chrome_port: parseInt(document.getElementById('chrome_port').value, 10) || 9222,
+      heartbeat_interval: parseInt(document.getElementById('heartbeat_interval').value, 10) || 100,
+      refresh_interval: parseInt(document.getElementById('refresh_interval').value, 10) || 180
     }
+  };
+  prefs = data.preferences;
 
-    function applyLang() {
-        document.querySelectorAll('[data-i18n]').forEach(el => {
-            const key = el.getAttribute('data-i18n');
-            if (i18nDict[currentLang] && i18nDict[currentLang][key] !== undefined) {
-                el.textContent = i18nDict[currentLang][key];
-            }
-        });
-        document.documentElement.lang = currentLang === 'zh' ? 'zh' : 'en';
-        renderTasks();
-        const statusEl = document.getElementById('status-text');
-        if (statusEl) {
-            const isRunning = statusEl.getAttribute('data-status') === 'running';
-            statusEl.textContent = isRunning ? t('status_running') : t('status_stopped');
-        }
+  fetch('/api/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  })
+  .then(function (res) { return res.json(); })
+  .then(function (result) {
+    if (result.status === 'success') {
+      showToast(t('alert_saved'), 'success');
+      document.getElementById('refresh-display').textContent = data.bot_settings.refresh_interval + 's';
+    } else {
+      showToast(result.message || 'Error', 'error');
     }
+  })
+  .catch(function (err) {
+    console.error('Save failed:', err);
+    showToast(t('alert_network_error'), 'error');
+  });
+}
+function startBot() {
+  fetch('/api/start', { method: 'POST' })
+  .then(function (res) { return res.json(); })
+  .then(function (data) {
+    if (data.status === 'success') { updateStatus(); showToast(t('alert_started'), 'success'); }
+    else { showToast(data.message || t('alert_already_running'), 'warning'); }
+  })
+  .catch(function () { showToast(t('alert_network_error'), 'error'); });
+}
+function stopBot() {
+  showToast(t('alert_stopped'), 'info');
+  fetch('/api/stop', { method: 'POST' })
+  .then(function (res) { return res.json(); })
+  .then(function () { updateStatus(); })
+  .catch(function () { showToast(t('alert_network_error'), 'error'); });
+}
 
-    function toggleLang() {
-        currentLang = currentLang === 'zh' ? 'en' : 'zh';
-        localStorage.setItem('ktmb_lang', currentLang);
-        applyLang();
+// ==================== status board ====================
+function setFlipboard(text, running) {
+  var el = document.getElementById('status-flip');
+  var chars = String(text).split('');
+  var html = '';
+  chars.forEach(function (ch, i) {
+    var content = (ch === ' ') ? '&nbsp;' : esc(ch);
+    html += '<span class="flap ' + (running ? 'on' : 'off') + '" style="--d:' + (i * 70) + 'ms">' + content + '</span>';
+  });
+  el.innerHTML = html;
+}
+function applyStatus(isRunning) {
+  var label = isRunning ? t('status_running') : t('status_stopped');
+  var dot = document.getElementById('status-dot');
+  dot.className = 'dot ' + (isRunning ? 'running' : 'stopped');
+  document.getElementById('status-text').textContent = label;
+  document.getElementById('btn-start').disabled = isRunning;
+  document.getElementById('btn-stop').disabled = !isRunning;
+  setFlipboard(label, isRunning);
+}
+function updateStatus() {
+  fetch('/api/status')
+  .then(function (res) { return checkAuth(res); })
+  .then(function (res) { return res ? res.json() : null; })
+  .then(function (data) {
+    if (!data) return;
+    if (lastStatus !== data.running) {
+      lastStatus = data.running;
+      applyStatus(data.running);
     }
+  })
+  .catch(function (err) { console.error('Status fetch failed:', err); });
+}
 
-    applyLang();
-    // ==================== End i18n System ====================
-
-    let tasks = {{ config.get('search_tasks', [{}]) | tojson | safe }};
-    if (tasks.length === 0 || !tasks[0].from) {
-        tasks = [{from: "KLUANG ETS Intercity", to: "JB SENTRAL ETS Intercity", year: 2026, month: 3, day: "2", time: "18:49", is_old_train: true}];
+// ==================== log polling ====================
+function pollLogs() {
+  fetch('/api/logs?from_line=' + lastLogLine)
+  .then(function (res) { return checkAuth(res); })
+  .then(function (res) { return res ? res.json() : null; })
+  .then(function (data) {
+    if (!data) return;
+    if (data.logs && data.logs.length > 0) {
+      var consoleEl = document.getElementById('log-console');
+      var stick = document.getElementById('autoscroll').checked;
+      var colored = colorizeLog(data.logs);
+      if (lastLogLine === 0) consoleEl.innerHTML = colored;
+      else consoleEl.insertAdjacentHTML('beforeend', colored);
+      while (consoleEl.children.length > 800) consoleEl.removeChild(consoleEl.firstChild);
+      if (stick) consoleEl.scrollTop = consoleEl.scrollHeight;
     }
+    lastLogLine = data.total_lines || 0;
+  })
+  .catch(function (err) { console.error('Log fetch failed:', err); });
+}
 
-    renderTasks();
+// ==================== boot ====================
+document.addEventListener('DOMContentLoaded', function () {
+  applyPrefs();
+  applyI18n();
+  updateStatus();
+  pollLogs();
 
-    function renderTasks() {
-        const container = document.getElementById('tasks-container');
-        container.innerHTML = '';
-
-        tasks.forEach((task, index) => {
-            const isOldTrain = task.is_old_train !== false;
-            const html = `
-            <div class="task-block border rounded p-3 mb-3 position-relative shadow-sm" data-index="${index}">
-                ${tasks.length > 1 ? `<button type="button" class="btn-close position-absolute top-0 end-0 m-2" onclick="removeTask(${index})" title="${t('delete_plan_title')}"></button>` : ''}
-
-                <div class="row g-2 mb-2 align-items-end">
-                    <div class="col-5">
-                        <label class="form-label text-muted small mb-1">${t('from_station')}</label>
-                        <input type="text" class="form-control station-from" list="stations" value="${task.from || ''}">
-                    </div>
-                    <div class="col-2 d-flex justify-content-center pb-1">
-                        <div class="swap-btn" onclick="swapStation(${index})" title="${t('swap_stations_title')}">🔄</div>
-                    </div>
-                    <div class="col-5">
-                        <label class="form-label text-muted small mb-1">${t('to_station')}</label>
-                        <input type="text" class="form-control station-to" list="stations" value="${task.to || ''}">
-                    </div>
-                </div>
-
-                <div class="row g-2 mb-2">
-                    <div class="col-4"><label class="form-label text-muted small mb-1">${t('year')}</label><input type="number" class="form-control task-year" value="${task.year || new Date().getFullYear()}"></div>
-                    <div class="col-4"><label class="form-label text-muted small mb-1">${t('month')}</label><input type="number" class="form-control task-month" value="${task.month || 1}"></div>
-                    <div class="col-4"><label class="form-label text-muted small mb-1">${t('day')}</label><input type="number" class="form-control task-day" value="${task.day || '1'}"></div>
-                </div>
-
-                <div class="row g-2">
-                    <div class="col-6">
-                        <label class="form-label text-muted small mb-1">${t('time_label')}</label>
-                        <input type="text" class="form-control task-time" value="${task.time || '08:00'}" placeholder="HH:MM">
-                    </div>
-                    <div class="col-6">
-                        <label class="form-label text-muted small mb-1">${t('train_type')}</label>
-                        <select class="form-select task-type">
-                            <option value="true" ${isOldTrain ? 'selected' : ''}>${t('old_train')}</option>
-                            <option value="false" ${!isOldTrain ? 'selected' : ''}>${t('new_train')}</option>
-                        </select>
-                    </div>
-                </div>
-            </div>`;
-            container.insertAdjacentHTML('beforeend', html);
-        });
-    }
-
-    function addTask() {
-        const lastTask = tasks[tasks.length - 1];
-        tasks.push({
-            from: lastTask.from, to: lastTask.to,
-            year: lastTask.year, month: lastTask.month, day: lastTask.day,
-            time: "12:00", is_old_train: lastTask.is_old_train
-        });
-        renderTasks();
-    }
-
-    function removeTask(index) {
-        syncTasksFromDOM();
-        tasks.splice(index, 1);
-        renderTasks();
-    }
-
-    function swapStation(index) {
-        const blocks = document.querySelectorAll('.task-block');
-        const block = blocks[index];
-        const fromInput = block.querySelector('.station-from');
-        const toInput = block.querySelector('.station-to');
-        const temp = fromInput.value;
-        fromInput.value = toInput.value;
-        toInput.value = temp;
-    }
-
-    function syncTasksFromDOM() {
-        const result = [];
-        document.querySelectorAll('.task-block').forEach((block, idx) => {
-            result.push({
-                from: block.querySelector('.station-from').value,
-                to: block.querySelector('.station-to').value,
-                year: parseInt(block.querySelector('.task-year').value) || 2026,
-                month: parseInt(block.querySelector('.task-month').value) || 1,
-                day: block.querySelector('.task-day').value || '1',
-                time: block.querySelector('.task-time').value || '00:00',
-                is_old_train: block.querySelector('.task-type').value === 'true',
-                type: `${t('monitor_plan')} ${idx + 1}`
-            });
-        });
-        tasks = result;
-        return result;
-    }
-
-    function saveConfig() {
-        const data = {
-            "account": {
-                "email": document.getElementById('email').value,
-                "password": document.getElementById('password').value
-            },
-            "payment_method": document.getElementById('payment_method').value,
-            "search_tasks": syncTasksFromDOM(),
-
-            "notification": {
-                "telegram_token": document.getElementById('tg_token').value,
-                "telegram_chat_id": document.getElementById('tg_chat_id').value,
-                "heartbeat_screenshot": document.getElementById('tg_heartbeat_screenshot').checked
-            },
-            "preferences": {
-                "prefer_forward": document.getElementById('pref_forward').checked,
-                "prefer_window": document.getElementById('pref_window').checked,
-                "prefer_normal_seat": document.getElementById('pref_normal').checked,
-                "accept_table_seat": document.getElementById('pref_table').checked
-            },
-
-            "bot_settings": {
-                "bot_id": document.getElementById('bot_id').value,
-                "chrome_port": parseInt(document.getElementById('chrome_port').value) || 9222,
-                "heartbeat_interval": parseInt(document.getElementById('heartbeat_interval').value) || 100,
-                "refresh_interval": parseInt(document.getElementById('refresh_interval').value) || 180
-            }
-        };
-
-        fetch('/api/save', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        })
-        .then(res => res.json())
-        .then(data => {
-            if (data.status === 'success') {
-                showToast(t('alert_saved'), 'success');
-            } else {
-                showToast(data.message || '保存失败', 'danger');
-            }
-        })
-        .catch(err => {
-            console.error('保存失败:', err);
-            showToast(t('alert_network_error'), 'danger');
-        });
-    }
-
-    function startBot() {
-        fetch('/api/start', { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-            if (data.status === 'success') {
-                updateStatus();
-                showToast(t('alert_started'), 'success');
-            } else {
-                showToast(t('alert_already_running'), 'warning');
-            }
-        })
-        .catch(err => {
-            console.error('启动失败:', err);
-            showToast(t('alert_network_error'), 'danger');
-        });
-    }
-
-    function stopBot() {
-        fetch('/api/stop', { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-            updateStatus();
-            showToast(t('alert_stopped'), 'info');
-        })
-        .catch(err => {
-            console.error('停止失败:', err);
-            showToast(t('alert_network_error'), 'danger');
-        });
-    }
-
-    function updateStatus() {
-        fetch('/api/status')
-        .then(res => res.json())
-        .then(data => {
-            const isRunning = data.running;
-            document.getElementById('status-dot').className = isRunning ? 'status-dot running' : 'status-dot stopped';
-            const statusEl = document.getElementById('status-text');
-            statusEl.setAttribute('data-status', isRunning ? 'running' : 'stopped');
-            statusEl.textContent = isRunning ? t('status_running') : t('status_stopped');
-            document.getElementById('btn-start').disabled = isRunning;
-            document.getElementById('btn-stop').disabled = !isRunning;
-        })
-        .catch(err => {
-            console.error('获取状态失败:', err);
-        });
-    }
-
-    // 日志增量加载
-    let lastLogLine = 0;
-
-    function pollLogs() {
-        fetch(`/api/logs?from_line=${lastLogLine}`)
-        .then(res => res.json())
-        .then(data => {
-            if (data.logs && data.logs.length > 0) {
-                const consoleEl = document.getElementById('log-console');
-                const isScrolledToBottom = consoleEl.scrollHeight - consoleEl.clientHeight <= consoleEl.scrollTop + 10;
-
-                if (lastLogLine === 0) {
-                    // 首次加载，替换全部
-                    consoleEl.innerText = data.logs;
-                } else {
-                    // 增量追加
-                    consoleEl.innerText += data.logs;
-                }
-
-                if (isScrolledToBottom) {
-                    consoleEl.scrollTop = consoleEl.scrollHeight;
-                }
-            }
-            lastLogLine = data.total_lines || 0;
-        })
-        .catch(err => {
-            console.error('获取日志失败:', err);
-        });
-    }
-
-    // 每 2 秒轮询状态和日志
-    setInterval(() => {
-        updateStatus();
-        pollLogs();
-    }, 2000);
+  setInterval(updateStatus, 3000);
+  setInterval(pollLogs, 2000);
+  setInterval(function () {
+    var now = new Date();
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    document.getElementById('clock').textContent = pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+  }, 1000);
+});
 </script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
+

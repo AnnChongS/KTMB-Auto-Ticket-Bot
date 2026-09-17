@@ -77,16 +77,20 @@
 
 | 指令 | 说明 |
 |------|------|
+| `/status` | 运行状态总览：阶段、轮数、已运行时长、当前计划、上次结果、下次刷新、监控计划清单 |
+| `/plans` | 只列出所有监控计划（地点 → 地点 · 日期 时间 · 车型） |
+| `/seats` | 当前取票偏好（优先级 + 各项开关） |
+| `/page` | 当前浏览器所在页面 URL |
 | `/snap` | 截取当前屏幕画面发送到手机 |
-| `/snap1` | 指定 Bot ID=1 截屏（多机器人时使用） |
-| `/duitnow` | 生成 DuitNow 付款二维码 |
+| `/help` | 显示指令帮助 |
+| `/duitnow` | 生成 DuitNow 付款二维码（Fiuu 网关，自动点到二维码页） |
 | `/tng` | 生成 Touch 'n Go 付款二维码 |
 | `/wallet` | 使用 KTM Wallet 自动扣款 |
 | `/manual` | 切换为人工付款模式 |
+| `/cancel` | 取消付款待命 |
 | `/logout` | 安全登出 KTMB 账号并关闭程序 |
-| `/logout1` | 指定 Bot ID=1 安全登出 |
 
-> 支持 `/snap all`（广播）和 `/snap1`（定向）两种格式
+> 所有指令都支持 `/cmd all`（广播）和 `/cmd1`（定向 Bot ID=1），例如 `/status1`、`/snap all`
 
 ---
 
@@ -167,7 +171,114 @@
 
 ---
 
+## 🛡️ 关于 30 分钟冷却（重要）
+
+KTMB 同一账号**不允许同时登录**。如果程序被强制杀死（SIGKILL / 直接关窗口）而没有登出，
+下一次登录会收到 `Not allow multiple login`，账号会被锁定到旧会话超时（约 30 分钟）。
+
+本版本已针对这一点做了多层保护：
+
+1. **登录后立即缓存 cookies** 到 `.ktmb_session.json`（已加入 `.gitignore`）
+2. **收到停止信号（SIGTERM/SIGINT）时**：先起后台线程用 cookies 走 HTTP 登出，主循环退出后再做一次完整登出
+3. **启动时自动清理残留会话**：如果上次没正常登出，启动时会先尝试用缓存 cookies 登出，避免“多处登录”
+4. **识别 `Not allow multiple login`**：不再反复重试登录，而是等待 5 分钟后再试，并发送 Telegram 提醒
+5. **正常停止 Web 面板**：`/api/stop` 会给机器人最多 45 秒完成登出，再强制结束
+
+> 请始终通过 Web 面板的 **停止** 按钮或 Telegram `/logout` 退出，不要直接 `kill -9`。
+
+---
+
+## 🧭 故障排查
+
+| 现象 | 原因 / 处理 |
+|------|-------------|
+| `Not allow multiple login` | 账号已在别处登录，等待约 30 分钟或先登出旧会话 |
+| 提示「监控日期已过期」 | `search_tasks` 里的日期已过去，请在面板改成未来日期 |
+| 提示「该车次没有可选座位」 | 该车次确实无票，等待下一轮刷新 |
+| 提示「未能到达付款页面」 | 支付流程元素变化，日志里会有截图，可据此更新选择器 |
+| 日志文件过大 | 超过 5MB 会自动轮转为 `bot.log.1` |
+
+---
+
+## 🧩 关键页面元素（2026-09 实测）
+
+| 步骤 | 元素 |
+|------|------|
+| 首页站点 | `#select2-FromStationId-container` / `#select2-ToStationId-container`，选项文本为 `站名 + 车型` |
+| 出发日期 | `#OnwardDate` + lightpick 日历（`.lightpick__select-year(s)/__month(s)/__day/__next-action`） |
+| 搜索 | `#btnSubmit` |
+| 搜索结果 | `.depart-trips > tr`，每行 `.btn-seat-layout`；行内有 `data-HourMinute` |
+| 选座弹窗 | `#seatSelect.show`、`.coache-btn[data-CoacheId]`、`.coache-layout`、`img.selectable-icon[data-seat-no][data-coache-id][data-seat-service-type][data-seat-price]`、`#confirmSeatBtn` |
+| 座位图标 | `/Image/GetSeatTypeImageFromTrain?id=StanForWinWC / StanForAisleWC / StanBackWinWC / StanClusForWinWC / StdBwWinOKUFlexi ...`（`Win`=靠窗、`For/Back`=朝向、`Clus`=大桌、`Table`=桌位） |
+| 订座结果 | 隐藏域 `#bookingData`，成功后出现 `.btn-passenger`，取消用 `.btn-reset` |
+| 乘客页 | `/Book`：`.IsSelf`、`select.TicketTypeId`(value=`Adult`)、`#btnConfirmPayment` |
+| 保险 | `#btnUpdateInsuranceNo`(NO THANKS) → 弹窗 `#popupModalOkButton` |
+| 继续付款 | `#btnProceedToPayment` → 餐食确认 `#confirmationConfirmButton` |
+| 付款方式页 | `#btnKtmbEWallet` / `#btnGoPaymentDuitNow` / `#btnGoPaymentTnG`（都是 `div`） |
+| 网关过渡页 | `#PaymentGateway`（value: `Click HERE to proceed to payment gateway`，初始 `display:none`） |
+| 网关(Fiuu) | `#pay-now-nomultipayment` / `.pay-button` → 之后是 `viewqr.php` 二维码页 |
+
+> 注意：付款方式页与乘客页 URL 都是 `/Book`，**不能靠 URL 判断是否到达付款页**，必须检测付款按钮元素。
+
+---
+
+## 🎫 选座规则（v1.3 重写）
+
+选座完全由页面元素（`data-*` 属性 + 座位图标 URL）驱动，**自动识别新旧火车**，不再依赖硬编码选择器。
+旧火车没有 Takaful 保险，新火车有 —— 流程改为「页面上有哪个按钮就点哪个」，新旧车共用一套代码。
+
+| 优先级 | 座位 | 说明 |
+|--------|------|------|
+| 01 | 靠过道 | 最优先（面板可关闭） |
+| 02 | 靠窗 | 没有过道位时的第二选择 |
+| 03 | 大桌位 / cluster | 普通座全部售罄才会选 |
+| 04 | 卧铺 | 旧火车最后选择，默认关闭 |
+| 05 | 头等舱 / 商务舱 | **默认关闭**，打开后前面几档都没位才会选 |
+| 06 | OKU 无障碍座 | **默认关闭**，打开后才会选（这是给身心障碍人士预留的座位） |
+
+- 旧火车额外按 **正向 > 反向** 排序（`for`/`fwd` vs `back`/`bwd`/`bw`）
+- 头等舱 / OKU 都是**可选开关**，想买头等舱时在面板打开 05；
+  想**优先**买头等舱再打开「头等舱优先(排最前)」
+- 额外屏蔽关键词可在面板「取票偏好」填写（英文逗号分隔，留空即可）
+- 无票 / 只剩不符合偏好的座位时，同一提醒 **15 分钟只发一次**，不再 Telegram 刷屏
+- 车型自动判定：出现大桌位 => 新火车(ETS)；出现反向座 => 旧火车(Intercity)
+
+---
+
+## 🖥️ 新版管理面板（v1.3）
+
+界面改为「铁路调度台 / 发车时刻牌」风格：翻牌状态灯、纸质车票式任务卡、选座优先级阶梯、点阵日志台。
+
+- 5 个标签页：乘车计划 / 取票偏好 / 账号付款 / 通知 / 系统
+- 选座偏好阶梯：01 过道 → 02 靠窗 → 03 大桌位 → 04 卧铺，开关即时生效
+- 保存前校验：日期必须是未来、时间必须 HH:MM、站点不能为空
+- 登录页与远程控制页同步换新
+
+> 修改模板后需要重启 `app.py`（Flask 会缓存模板）。
+
+---
+
+## 🚀 启动脚本（v1.3 重写）
+
+**Linux**
+
+```
+./start_linux.sh          # 启动（自动建 venv、装依赖、下浏览器、检测端口占用）
+./start_linux.sh stop     # 停止（先让机器人安全登出 KTMB）
+./start_linux.sh status   # 状态
+./start_linux.sh restart  # 重启
+```
+
+**Windows**：双击 `start_bot.bat`，按 Ctrl+C 停止（会先安全登出）。
+
+- Linux 下端口被占用会**自动改用下一个可用端口**
+- 脚本把 `PLAYWRIGHT_BROWSERS_PATH` 指向项目内 `browsers/`，不再依赖全局缓存
+- `app.py` 现在处理 SIGTERM/SIGINT：停止 Web 面板会连带把机器人优雅停掉（先登出）
+
+---
+
 ## 🔒 安全说明
+
 
 - **Web 面板密码**：请通过环境变量 `KTMB_WEB_PASSWORD` 修改默认密码 `admin123`
 - **网络访问**：Web 面板默认仅监听 `127.0.0.1`（本地访问），设置 `KTMB_WEB_HOST=0.0.0.0` 可允许远程访问（不建议，需额外安全措施）

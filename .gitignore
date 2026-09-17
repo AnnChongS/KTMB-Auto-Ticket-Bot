@@ -7,3 +7,8 @@ web_server.log
 linux_chrome_data/
 *.egg-info/
 handoff_memory.md
+.ktmb_session.json
+browsers/
+screenshot_*.png
+bot.log.*
+ktmb_web.pid

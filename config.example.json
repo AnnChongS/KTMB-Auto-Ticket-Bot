@@ -6,13 +6,13 @@
     "payment_method": "Command",
     "search_tasks": [
         {
-            "from": "KLUANG ETS Intercity",
-            "to": "JB SENTRAL ETS Intercity",
+            "from": "KL SENTRAL",
+            "to": "IPOH",
             "year": 2026,
-            "month": 5,
-            "day": 17,
-            "time": "14:31",
-            "is_old_train": false,
+            "month": 12,
+            "day": 20,
+            "time": "15:00",
+            "train_mode": "auto",
             "type": "监控计划 1"
         }
     ],
@@ -22,10 +22,16 @@
         "heartbeat_screenshot": true
     },
     "preferences": {
-        "prefer_forward": true,
-        "prefer_window": true,
         "prefer_normal_seat": true,
-        "accept_table_seat": true
+        "prefer_aisle": true,
+        "prefer_window": true,
+        "prefer_forward": true,
+        "accept_table_seat": true,
+        "accept_berth": false,
+        "accept_first_class": false,
+        "accept_oku": false,
+        "exclude_seat_keywords": [],
+        "prefer_first_class": false
     },
     "bot_settings": {
         "bot_id": "1",

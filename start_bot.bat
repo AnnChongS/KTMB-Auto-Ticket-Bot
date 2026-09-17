@@ -1,82 +1,79 @@
 @echo off
-:: 设置字符集为UTF-8，防止中文乱码和闪退
+rem ============================================================
+rem  KTMB Ticket Commander - Windows launcher
+rem  1. Double-click this file
+rem  2. Open http://127.0.0.1:5000 in your browser
+rem  3. Press Ctrl+C in this window to stop (the bot logs out first)
+rem ============================================================
+setlocal enabledelayedexpansion
 chcp 65001 >nul
-title KTMB Web UI - Auto Launcher
-color 0b
+title KTMB Ticket Commander
+cd /d "%~dp0"
+
+set "VENV_PY=%CD%\venv\Scripts\python.exe"
+set "PLAYWRIGHT_BROWSERS_PATH=%CD%\browsers"
+if "%KTMB_WEB_PORT%"=="" set "KTMB_WEB_PORT=5000"
 
 echo ===================================================
-echo     KTMB Web UI - One-Click Launcher
+echo   KTMB Ticket Commander - launcher
 echo ===================================================
 echo.
 
-:: 1. Check Python
-echo [1/5] Checking Python...
+echo [1/6] Checking Python...
 python --version >nul 2>&1
 if errorlevel 1 (
-    color 0c
-    echo [ERROR] Python is not installed or not in PATH!
-    echo 请先安装 Python 并勾选 "Add Python to PATH".
+    echo [ERROR] Python not found. Install Python 3.9+ and tick "Add Python to PATH".
     pause
-    exit /b
+    exit /b 1
 )
-echo Python is OK.
-echo.
 
-:: 2. Auto-create requirements.txt
-echo [2/5] Checking requirements.txt...
-if not exist requirements.txt (
-    echo Auto-creating requirements.txt...
-    echo requests> requirements.txt
-    echo playwright>> requirements.txt
-    echo flask>> requirements.txt
-)
-echo requirements.txt is OK.
-echo.
-
-:: 3. Check and Create VENV
-set VENV_DIR=venv
-echo [3/5] Checking virtual environment (venv)...
-if not exist "%VENV_DIR%\Scripts\activate.bat" (
-    echo Creating venv... This might take a minute...
-    python -m venv %VENV_DIR%
+echo [2/6] Checking virtual environment...
+if not exist "%VENV_PY%" (
+    echo       creating venv...
+    python -m venv venv
     if errorlevel 1 (
-        color 0c
-        echo [ERROR] Failed to create venv!
+        echo [ERROR] failed to create venv
         pause
-        exit /b
+        exit /b 1
     )
 )
-echo Venv is OK.
+
+echo [3/6] Installing dependencies...
+"%VENV_PY%" -m pip install -q --disable-pip-version-check -r requirements.txt
+if errorlevel 1 (
+    echo [ERROR] pip install failed
+    pause
+    exit /b 1
+)
+
+echo [4/6] Checking Playwright browser...
+dir /b /ad "%PLAYWRIGHT_BROWSERS_PATH%\chromium-*" >nul 2>&1
+if errorlevel 1 (
+    echo       downloading Chromium (first run only)...
+    "%VENV_PY%" -m playwright install chromium
+    if errorlevel 1 (
+        echo [ERROR] browser download failed
+        pause
+        exit /b 1
+    )
+)
+
+echo [5/6] Checking port %KTMB_WEB_PORT%...
+netstat -ano | findstr /r /c:":%KTMB_WEB_PORT% .*LISTENING" >nul
+if not errorlevel 1 (
+    echo [WARN] port %KTMB_WEB_PORT% is already in use.
+    echo        Set another one first, e.g.  set KTMB_WEB_PORT=5001
+    echo.
+)
+
+echo [6/6] Starting web panel - keep this window open...
 echo.
-
-:: 4. Install dependencies
-echo [4/5] Installing dependencies (Please wait)...
-"%VENV_DIR%\Scripts\python.exe" -m pip install -r requirements.txt
-echo Checking Playwright browsers...
-"%VENV_DIR%\Scripts\python.exe" -m playwright install chromium
-echo Dependencies are OK.
+echo   Panel : http://127.0.0.1:%KTMB_WEB_PORT%
+echo   Pass  : admin123   (change it with KTMB_WEB_PASSWORD)
 echo.
-
-:: 5. Start Chrome
-echo [5/5] Starting Chrome (Port 9222)...
-start chrome --remote-debugging-port=9222 --user-data-dir="C:\ChromeDebug"
-echo.
-
-:: 6. Start Web Server
-echo Starting Flask Backend Server...
-timeout /t 2 /nobreak >nul
-
-:: 正确的启动虚拟环境并运行 app.py 的语法
-start "KTMB_Backend" cmd /k "%VENV_DIR%\Scripts\activate.bat && python app.py"
-
-echo Opening Web UI...
-timeout /t 3 /nobreak >nul
-start http://127.0.0.1:5000
+start "" cmd /c "timeout /t 3 >nul & start http://127.0.0.1:%KTMB_WEB_PORT%"
+"%VENV_PY%" app.py
 
 echo.
-echo ===================================================
-echo All Started! Please do not close the backend window.
-echo 启动完毕！请不要关闭名为 KTMB_Backend 的黑色终端窗口！
-echo ===================================================
-echo.
+echo Service stopped.
 pause

@@ -77,16 +77,20 @@ Click **Save** → **Start**, then wait for tickets 🎉
 
 | Command | Description |
 |---------|-------------|
-| `/snap` | Capture current screen and send to your phone |
-| `/snap1` | Capture screen for Bot ID=1 (used when running multiple bots) |
-| `/duitnow` | Generate DuitNow payment QR code |
-| `/tng` | Generate Touch 'n Go payment QR code |
-| `/wallet` | Use KTM Wallet for auto-deduction |
-| `/manual` | Switch to manual payment mode |
-| `/logout` | Safely log out of KTMB account and shut down |
-| `/logout1` | Safely log out for Bot ID=1 |
+| `/status` | Full status: phase, round, uptime, current plan, last result, next refresh, plan list |
+| `/plans` | List every monitored plan (from -> to - date time - train mode) |
+| `/seats` | Current seat preference ladder and toggles |
+| `/page` | URL of the page the browser is on |
+| `/snap` | Capture the current screen and send it to your phone |
+| `/help` | Show command help |
+| `/duitnow` | Generate the DuitNow payment QR (Fiuu gateway, clicks through to the QR page) |
+| `/tng` | Generate the Touch 'n Go payment QR |
+| `/wallet` | Pay with KTM Wallet |
+| `/manual` | Switch to manual payment |
+| `/cancel` | Cancel the payment standby |
+| `/logout` | Safely log out of KTMB and shut down |
 
-> Supports both `/snap all` (broadcast) and `/snap1` (targeted) formats
+> Every command supports `/cmd all` (broadcast) and `/cmd1` (target Bot ID=1), e.g. `/status1`, `/snap all`
 
 ---
 
@@ -167,7 +171,96 @@ Payment complete → Notify user → Program exits
 
 ---
 
+## 🛡️ About the 30-minute cooldown (important)
+
+KTMB only allows **one active session per account**. If the bot process is killed without
+logging out, the next login returns `Not allow multiple login` and the account stays locked
+until the old session times out (about 30 minutes).
+
+This version protects against that in several ways:
+
+1. Cached cookies are written to `.ktmb_session.json` right after login (already git-ignored)
+2. On SIGTERM/SIGINT a background thread performs an HTTP logout immediately, then the main
+   loop performs a full logout before exiting
+3. On startup any leftover session from a previous crash is logged out first
+4. `Not allow multiple login` is detected and the bot waits 5 minutes instead of retrying in a loop
+5. `/api/stop` waits up to 45 seconds for a graceful logout before force-killing the process
+
+> Always stop the bot with the Web panel **Stop** button or Telegram `/logout`, never `kill -9`.
+
+---
+
+## 🧭 Troubleshooting
+
+| Symptom | Cause / Fix |
+|---------|-------------|
+| `Not allow multiple login` | Account already logged in elsewhere; wait ~30 min or log out the old session |
+| "target date has passed" | Update the date in `search_tasks` via the web panel |
+| "no selectable seat" | The train is really full; the bot keeps refreshing |
+| "could not reach the payment page" | Payment DOM changed; check the log screenshot and update selectors |
+| Log file too large | Rotated automatically to `bot.log.1` above 5MB |
+
+---
+
+## 🎫 Seat selection rules (rewritten in v1.3)
+
+Seat picking is driven purely by page data (`data-*` attributes + seat icon URLs) and
+**auto-detects old vs new trains** - no hard-coded selectors. Old trains have no Takaful
+insurance while new ones do, so the flow now simply clicks whatever button exists on the page.
+
+| Priority | Seat | Note |
+|----------|------|------|
+| 01 | Aisle | highest priority (toggle in the panel) |
+| 02 | Window | second choice when no aisle seat |
+| 03 | Table / cluster | only when every normal seat is gone |
+| 04 | Berth | old trains, last resort (off by default) |
+| 05 | First / Business class | **off by default**, used only when higher tiers have no seat |
+| 06 | OKU accessible seat | **off by default**, reserved for passengers with disabilities |
+
+- Old trains additionally sort **forward > backward** (`for`/`fwd` vs `back`/`bwd`/`bw`)
+- First class and OKU are optional toggles - turn 05 on when you actually want first class,
+  then enable "First class first" to make it the top priority
+- Extra blocked keywords are editable in the panel (comma separated, empty by default)
+- "No seats" / "only unwanted seats" alerts are throttled to once every 15 minutes
+- Train type detection: cluster seats => new (ETS); backward seats => old (Intercity)
+
+---
+
+## 🖥️ New admin panel (v1.3)
+
+Railway dispatch-console aesthetic: split-flap status board, paper-ticket task cards, seat
+priority ladder, dot-matrix log console.
+
+- Five tabs: Trips / Seats / Account / Alerts / System
+- Seat priority ladder 01 aisle -> 02 window -> 03 table -> 04 berth with live toggles
+- Save-time validation: future date, HH:MM time, stations required
+- Login and remote-control pages restyled to match
+
+> Restart `app.py` after editing templates (Flask caches them).
+
+---
+
+## 🚀 Launcher scripts (rewritten in v1.3)
+
+**Linux**
+
+```
+./start_linux.sh          # start (venv, deps, browser, free-port check)
+./start_linux.sh stop     # stop (bot logs out of KTMB first)
+./start_linux.sh status
+./start_linux.sh restart
+```
+
+**Windows**: double-click `start_bot.bat`, press Ctrl+C to stop (graceful logout first).
+
+- On Linux a busy port automatically rolls over to the next free one
+- Scripts point `PLAYWRIGHT_BROWSERS_PATH` at the local `browsers/` folder
+- `app.py` now handles SIGTERM/SIGINT: stopping the panel also stops the bot gracefully
+
+---
+
 ## 🔒 Security Notes
+
 
 - **Web Panel Password**: Change the default password `admin123` via environment variable `KTMB_WEB_PASSWORD`
 - **Network Access**: Web panel defaults to `127.0.0.1` (localhost only). Set `KTMB_WEB_HOST=0.0.0.0` to allow remote access (not recommended without additional security)
