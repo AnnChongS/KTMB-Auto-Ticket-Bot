@@ -292,27 +292,55 @@ def install_warp():
     return False
 
 
-def enable_warp_proxy(port=DEFAULT_WARP_PORT, auto_install=False, wait_seconds=40):
-    """开 WARP 代理模式（SOCKS5），返回 (ok, 说明)"""
+def _warp_registered():
+    """已经注册过就别再注册：registration new 会替换已有注册（Teams 用户会掉出组织）"""
+    for args in (("-j", "registration", "show"), ("registration", "show")):
+        code, out = warp_cli(*args, timeout=30)
+        text = (out or "").strip()
+        if code == 0 and text:
+            low = text.lower()
+            if "no registration" in low or "not registered" in low:
+                return False
+            return True
+    return False
+
+
+def enable_warp_proxy(port=DEFAULT_WARP_PORT, auto_install=False, wait_seconds=40, force=False):
+    """开 WARP 代理模式（本地 SOCKS5），返回 (ok, 说明)
+
+    - 已经装了 WARP：绝不重新下载/安装（只有找不到 warp-cli 时才安装）
+    - 代理端口已经在监听：什么都不改，直接复用
+    - 已经注册过：跳过 registration new（避免 Teams / Zero Trust 用户掉出组织）
+    """
     if not find_warp_cli():
         if not (auto_install and is_windows()):
             return False, "没有找到 warp-cli，请先安装 Cloudflare WARP"
         if not install_warp():
             return False, "WARP 安装失败"
-    print("[WARP] 注册设备 ...")
-    warp_cli("registration", "new", timeout=120)     # 已注册会报错，忽略
+
+    if port_listening("127.0.0.1", port) and not force:
+        return True, "WARP 代理端口 %d 已经在跑，直接复用（没有改动任何设置）" % port
+
+    if not _warp_registered():
+        print("[WARP] 首次使用，注册设备 ...")
+        code, out = warp_cli("registration", "new", timeout=120)
+        if code != 0:
+            return False, "warp-cli registration new 失败：%s" % (out or "")[:200]
+    else:
+        print("[WARP] 检测到已有注册，跳过注册（不会动你原来的账号/组织）")
+
     print("[WARP] 切换为代理模式 (SOCKS5) ...")
     code, out = warp_cli("mode", "proxy", timeout=60)
     if code != 0:
-        return False, "warp-cli mode proxy 失败：%s" % out[:200]
+        return False, "warp-cli mode proxy 失败：%s" % (out or "")[:200]
     code, out = warp_cli("proxy", "port", str(port), timeout=60)
     if code != 0:
-        print("[WARP] 设置端口失败（用默认端口继续）：%s" % out[:120])
+        print("[WARP] 设置端口失败（用默认端口继续）：%s" % (out or "")[:120])
     print("[WARP] 连接 ...")
     warp_cli("connect", timeout=120)
     if wait_port("127.0.0.1", port, seconds=wait_seconds):
-        return True, "WARP 代理模式已就绪：socks5h://127.0.0.1:%d" % port
-    return False, "WARP 已连接，但本地代理端口 %d 还没起来（可稍后重试或用 warp-cli status 查看）" % port
+        return True, "WARP 代理模式已就绪：socks5h://127.0.0.1:%d（已把 WARP 切换为代理模式）" % port
+    return False, "WARP 已连接，但本地代理端口 %d 还没起来（稍后重试，或看 warp-cli status）" % port
 
 
 # ============================ 3. 测试代理 ============================
