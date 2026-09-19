@@ -28,7 +28,7 @@ import secrets
 import logging
 import remote_control
 from remote_control import (SCREENSHOT_PATH, send_command, request_screenshot,
-                            read_result, screenshot_state)
+                            read_result, screenshot_state, mark_viewer)
 
 # ================= 📝 日志系统 =================
 logging.basicConfig(
@@ -585,6 +585,7 @@ def api_remote_screenshot():
     if not is_authenticated():
         return jsonify({"status": "error", "message": "未认证"}), 401
 
+    mark_viewer()                    # 告诉机器人"有人在看"，它才会持续发布画面
     if not os.path.exists(SCREENSHOT_PATH):
         request_screenshot()
         for _ in range(30):          # 等机器人产出第一帧，最多 6 秒
@@ -620,6 +621,7 @@ def api_remote_state():
     """远程控制页面的状态（画面是否新鲜 / 机器人在不在跑 / 当前阶段）"""
     if not is_authenticated():
         return jsonify({"status": "error", "message": "未认证"}), 401
+    mark_viewer()
     state = screenshot_state()
     state['bot_running'] = bot_is_running()
     state['stale_after'] = remote_control.SCREENSHOT_STALE_AFTER

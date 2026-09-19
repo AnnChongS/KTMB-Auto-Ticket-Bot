@@ -29,6 +29,8 @@ SCREENSHOT_META_PATH = os.path.join(_TMP, "ktmb_remote_screenshot.json")
 COMMAND_PATH = os.path.join(_TMP, "ktmb_remote_command.json")
 RESULT_PATH = os.path.join(_TMP, "ktmb_remote_result.json")
 SCREENSHOT_REQUEST_PATH = os.path.join(_TMP, "ktmb_screenshot_requested")
+VIEWER_PATH = os.path.join(_TMP, "ktmb_remote_viewer.json")
+VIEWER_TTL = 12                  # 面板页面还开着的判断窗口（秒）
 
 # 截图超过这个秒数就认为机器人已经不在发布画面了
 SCREENSHOT_STALE_AFTER = 90
@@ -37,7 +39,7 @@ SCREENSHOT_STALE_AFTER = 90
 def cleanup():
     """Bot 退出时清理临时文件"""
     for path in (SCREENSHOT_REQUEST_PATH, COMMAND_PATH, RESULT_PATH,
-                 SCREENSHOT_META_PATH, SCREENSHOT_PATH):
+                 SCREENSHOT_META_PATH, SCREENSHOT_PATH, VIEWER_PATH):
         try:
             if os.path.exists(path):
                 os.remove(path)
@@ -53,6 +55,29 @@ def request_screenshot():
         with open(SCREENSHOT_REQUEST_PATH, 'w') as f:
             f.write(str(time.time()))
         return True
+    except Exception:
+        return False
+
+
+def mark_viewer():
+    """Flask 调用: 有人正在看远程画面（页面每 3 秒会来取一帧）"""
+    try:
+        _write_json(VIEWER_PATH, {"ts": time.time()})
+    except Exception:
+        pass
+
+
+def viewer_active(max_age=VIEWER_TTL):
+    """Bot 调用: 现在有人在看画面吗？
+
+    没人在看的时候机器人不截屏 —— 抢票阶段最宝贵的就是时间，
+    截图（尤其 Windows 上）一次要几百毫秒。
+    """
+    data = _read_json(VIEWER_PATH)
+    if not data:
+        return False
+    try:
+        return time.time() - float(data.get("ts", 0)) <= max_age
     except Exception:
         return False
 
@@ -89,15 +114,21 @@ def _clear_screenshot_request():
         pass
 
 
-def publish_screenshot(page, force=False, interval=5.0, full_page=False, meta_extra=None):
+def publish_screenshot(page, force=False, interval=5.0, full_page=False,
+                       meta_extra=None, require_viewer=True):
     """Bot 调用: 把当前画面发布给 Web 面板
 
-    返回 True 表示真的截了一张。interval 秒内不会重复截（force=True 除外），
-    单次截图异常也不会影响主流程。
+    返回 True 表示真的截了一张。
+    - force=True 或面板点了"立即刷新" -> 一定截
+    - 平时只有在「有人正在看 /remote 画面」且超过 interval 秒时才截
+      （没人在看时完全不截，把时间留给抢票）
+    - 单次截图异常不影响主流程
     """
     try:
         requested = screenshot_requested()
         if not force and not requested:
+            if require_viewer and not viewer_active():
+                return False
             if interval and screenshot_age() is not None and screenshot_age() < interval:
                 return False
         _clear_screenshot_request()
@@ -153,11 +184,14 @@ def screenshot_state():
     }
 
 
-def publish_state(phase="", round_no=0):
-    """Bot 调用: 更新运行状态（附带在截图 meta 里，面板可显示当前阶段）"""
+def publish_state(phase="", round_no=0, extra=None):
+    """Bot 调用: 更新运行状态（写在截图 meta 里，面板显示当前阶段，不需要截图）"""
     meta = _read_json(SCREENSHOT_META_PATH) or {}
-    meta["phase"] = str(phase)
+    if phase:
+        meta["phase"] = str(phase)
     meta["round"] = round_no
+    if isinstance(extra, dict):
+        meta.update(extra)
     _write_json(SCREENSHOT_META_PATH, meta)
 
 

@@ -1,6 +1,6 @@
 English | **[中文](README_zh.md)**
 
-# 🚄 KTMB Auto Ticket Bot v1.3.2
+# 🚄 KTMB Auto Ticket Bot v1.3.3
 
 An automated ticket booking system for Malaysia's KTMB train service, supporting both **Windows** and **Linux** platforms.
 
@@ -26,6 +26,18 @@ Powered by Playwright browser automation to simulate real user operations — fu
 | 🔄 **Notification Retry** | Telegram notifications with automatic retry and exponential backoff |
 | 🎮 **Web Remote Control** | `/remote` live screen with mouse click / keyboard / CSS selector control - works even when Telegram is blocked |
 
+
+---
+
+## 🆕 v1.3.3: faster grabbing + Telegram never blocks
+
+| Symptom | Root cause (measured in your log) | Fix |
+|---------|----------------------------------|-----|
+| **Search / seat selection slow as a turtle** | (1) reading a missing #fixedPax element wasted the 20s default timeout; (2) the booking result waited 15s for bookingData and then 8s more for the button; (3) the result table was scanned row by row, one browser round trip per row (10+ rows = 20s+) | (1) the passenger count is read inside the same JS scan; (2) poll every 0.25s and continue the moment booking succeeds (saves 20s+); (3) all rows are scanned in a single JS call |
+| **Telegram hiccups froze the ticket flow** (log: a 51s stall at startup, 13s before clicking the passenger button) | notifications and getUpdates ran on the main thread, so network timeouts (15s each, with retries) were charged to the ticket flow | Telegram I/O moved to **background threads**: separate text/photo queues, a sender that retries until delivered (items kept up to 10 minutes), a long-polling receiver; the main thread only touches local queues - **it never waits for the network** |
+| Are messages lost while Telegram is down? | - | No: queued messages go out as soon as the network recovers; text has priority over photos; a best-effort flush runs on exit |
+| **The QR payment link did not open** | the URL sent was the bare viewqr.php from after clicking PAY (no order parameters) | Now the **gateway payment URL from BEFORE clicking PAY** is sent first (that is the valid one), then PAY is clicked, then both the QR page URL and the QR image URL are sent; the screenshot caption carries the link too |
+| Having /remote open slowed things down | a screenshot every 5s, a few hundred ms each on Windows | **No screenshots at all while nobody is watching**; with the page open it publishes on the configured interval (phase/state still update) |
 
 ---
 
@@ -210,7 +222,7 @@ Click **Save** → **Start**, then wait for tickets 🎉
 | `chrome_port` | Chrome debug port (default 9222) |
 | `heartbeat_interval` | Send heartbeat notification every N cycles |
 | `refresh_interval` | Seconds to wait when no tickets available (default 180) |
-| `screenshot_interval` | How often to publish a frame for `/remote` (default 5s, `0` = disable) |
+| `screenshot_interval` | How often to publish a frame for /remote (default 5s). Nothing is captured while nobody watches; 0 = only capture while the /remote page is open |
 
 ---
 
@@ -261,6 +273,7 @@ This version protects against that in several ways:
 | Log file too large | Rotated automatically to `bot.log.1` above 5MB |
 | **Windows: `Executable doesn't exist at ...\browsers\chromium_headless_shell-XXXX\...`** | **Fixed in v1.3.1.** The old `start_bot.bat` set `PLAYWRIGHT_BROWSERS_PATH` *after* `playwright install`, so Chromium was downloaded into the default cache (`%LOCALAPPDATA%\ms-playwright`) while the bot looked inside `.\browsers` - exactly this error. The variable is now set before installing, and the browser is installed + verified on every launch. If it still fails, delete the `browsers\` folder and run the launcher again. |
 | `cannot connect to existing Chrome: ECONNREFUSED ::1:9222` | Harmless: the bot starts its own Chromium. It only means "no external Chrome to attach to". |
+| **Does a dead Telegram slow the ticket flow?** | No. Since v1.3.3 notifications and commands use background threads: the ticket flow never waits for Telegram, and queued messages keep retrying until delivered (kept up to 10 minutes). |
 | **Telegram never connects although the network is fine** | Since v1.3.2: pooled connections, automatic retries, automatic IPv4 fallback, and a precise reason in the log. Behind a proxy set `KTMB_TG_PROXY=http://127.0.0.1:7890`; if the proxy breaks it, set `KTMB_TG_PROXY=off`. A wrong token gives `HTTP 401`, two instances give `HTTP 409`. |
 | **`/remote` stays on "connecting" with no picture** | The bot publishes frames continuously now: check whether the "phase" is moving; the page tells you whether the bot is not running or has not produced a frame yet. If the frame age never changes, look for the `[看门狗]` / `[定位失败]` lines in `bot.log`. |
 | **Remote clicks do nothing / hit the wrong spot** | Screenshots are viewport-sized now, so you click exactly what you see. Blocking overlays are reported through the command result. |

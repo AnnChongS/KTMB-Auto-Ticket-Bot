@@ -6,6 +6,13 @@ rem  2. A Chrome window will open by itself (that is the bot's browser - keep it
 rem  3. Open http://127.0.0.1:5000 in your browser
 rem  4. Press Ctrl+C in this window to stop (the bot logs out first)
 rem
+rem  v1.3.3 fixes
+rem  ----------------------------------------------------------
+rem  [F] Telegram runs on background threads now: a slow or dead
+rem      Telegram network can no longer slow down ticket grabbing.
+rem  [G] Seat selection / search no longer waste 20s+ on missing
+rem      elements or row-by-row scanning.
+rem
 rem  v1.3.2 fixes
 rem  ----------------------------------------------------------
 rem  [D] The bot now keeps the web panel's /remote screen alive by

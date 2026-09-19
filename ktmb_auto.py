@@ -29,9 +29,10 @@ import os
 import logging
 import signal
 import threading
+import queue
 from datetime import datetime
 from playwright.sync_api import Playwright, sync_playwright
-from remote_control import (publish_screenshot, get_command, peek_command,
+from remote_control import (publish_screenshot, publish_state, get_command, peek_command,
                             execute_remote_command, send_result,
                             cleanup as cleanup_remote_files)
 
@@ -191,6 +192,15 @@ TG_RETRY_DELAY = 2  # 秒
 
 _TG_NET = {"down": False, "last_log": 0.0, "reason": ""}
 
+# 通知发送队列 + 收发线程状态（Telegram 全部后台异步，绝不阻塞抢票）
+# 文字和图片分两条队列：文字（抢到票、付款链接、报错）永远优先，图片积压也不会挡住文字
+_TG_TEXT_Q = queue.Queue(maxsize=100)
+_TG_PHOTO_Q = queue.Queue(maxsize=12)
+_TG_GATE = {"until": 0.0, "backoff": 1.5}
+_TG_STATS = {"queued": 0, "sent": 0, "dropped": 0}
+TG_QUEUE_KEEP = 10 * 60          # 一条通知最多在队列里保留 10 分钟，期间一直重试
+_TG_WORKERS = {"started": False, "stop": False, "lock": threading.Lock(), "event": None}
+
 # Telegram 网络参数（可写在 config.json 的 notification 里，也可用环境变量覆盖）
 #   telegram_proxy : "http://127.0.0.1:7890" 指定代理；填 "off" / "direct" 表示强制直连（忽略系统代理）
 TG_PROXY = (os.environ.get("KTMB_TG_PROXY")
@@ -304,59 +314,190 @@ def _tg_ok():
         logger.info("[TG] Telegram 已恢复连接")
 
 
+def _tg_enqueue(kind, payload, caption=""):
+    """把通知丢进后台发送队列，立即返回（绝不等待网络）"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    item = {"kind": kind, "payload": payload, "caption": caption,
+            "ts": time.time(), "tries": 0}
+    target = _TG_PHOTO_Q if kind == "photo" else _TG_TEXT_Q
+    try:
+        target.put_nowait(item)
+    except queue.Full:
+        if kind == "photo":
+            # 截图是"锦上添花"，发不出去就丢，绝不占着内存/队列
+            _TG_STATS["dropped"] += 1
+            return
+        try:
+            target.get_nowait()           # 文字：丢最旧的，保证最新通知能发出去
+            target.put_nowait(item)
+        except Exception:
+            return
+    _TG_STATS["queued"] += 1
+    start_tg_workers()
+
+
 def send_notification(message):
-    """发送 Telegram 文字通知（连接复用 + 自动重试）"""
+    """发送 Telegram 文字通知（排队后台发送，不阻塞抢票）"""
     current_time = datetime.now().strftime('%H:%M:%S')
     formatted_msg = f"<b>[{BOT_NAME}] {current_time}</b>\n{message}"
     logger.info(f"[TG通知] {message[:80]}")
-
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": formatted_msg, "parse_mode": "HTML"}
-
-    resp, err = _tg_call("POST", url, data=data, timeout=15)
-    if resp is None:
-        return
-    if resp.status_code == 200:
-        return
-    detail = _tg_error_detail(resp)
-    if resp.status_code == 401:
-        logger.error("[TG] Bot Token 无效（HTTP 401），请在面板「通知」里重新填写 telegram_token")
-    elif resp.status_code == 400 and "chat not found" in detail.lower():
-        logger.error("[TG] chat_id 不正确（chat not found）：请先给机器人发一条消息再获取 chat_id")
-    else:
-        logger.warning(f"[TG通知] 发送失败（HTTP {resp.status_code}）: {detail}")
+    _tg_enqueue("text", formatted_msg)
 
 
 def send_telegram_photo(caption, image_bytes):
-    """发送 Telegram 截图通知（连接复用 + 自动重试；caption 过长会被截断）"""
+    """发送 Telegram 截图通知（排队后台发送，不阻塞抢票）"""
     if not image_bytes:
         return
     current_time = datetime.now().strftime('%H:%M:%S')
-    caption = str(caption)[:900]
-    formatted_caption = f"<b>[{BOT_NAME}] {current_time}</b>\n{caption}"
-    logger.info("[TG通知] 正在发送屏幕截图...")
+    formatted_caption = f"<b>[{BOT_NAME}] {current_time}</b>\n{str(caption)[:900]}"
+    logger.info("[TG通知] 截图已排队")
+    _tg_enqueue("photo", image_bytes, formatted_caption)
 
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+
+def _tg_send_once(item):
+    """发送一条；返回 (是否结束, 错误原因)"""
+    base = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    if item["kind"] == "photo":
+        resp, err = _tg_call("POST", base + "/sendPhoto", retries=1, timeout=(5, 45),
+                             data={"chat_id": TELEGRAM_CHAT_ID,
+                                   "caption": item.get("caption", ""), "parse_mode": "HTML"},
+                             files={"photo": ("screen.png", item["payload"], "image/png")})
+    else:
+        resp, err = _tg_call("POST", base + "/sendMessage", retries=1, timeout=(5, 20),
+                             data={"chat_id": TELEGRAM_CHAT_ID,
+                                   "text": item["payload"], "parse_mode": "HTML"})
+    if resp is None:
+        return False, err
+    if resp.status_code == 200:
+        return True, ""
+    detail = _tg_error_detail(resp)
+    if resp.status_code in (400, 401, 403, 404):
+        logger.warning(f"[TG] 发送被拒绝（HTTP {resp.status_code}）: {detail}")
+        return True, detail          # 内容/token 问题，重试没意义
+    return False, f"HTTP {resp.status_code}: {detail}"
+
+
+def _next_tg_item():
+    """先发文字，再发图片（文字才是抢票要紧的信息）"""
+    for q in (_TG_TEXT_Q, _TG_PHOTO_Q):
+        try:
+            return q.get_nowait()
+        except queue.Empty:
+            continue
+    return None
+
+
+def _requeue_tg_item(item):
+    q = _TG_PHOTO_Q if item["kind"] == "photo" else _TG_TEXT_Q
+    try:
+        q.put_nowait(item)
+    except queue.Full:
+        try:
+            q.get_nowait()
+            q.put_nowait(item)
+        except Exception:
+            _TG_STATS["dropped"] += 1
+
+
+def _tg_sender_loop():
+    """后台发送线程：一直重试直到送达（最多保留 10 分钟），网络不通也不影响抢票"""
+    while not _TG_WORKERS["stop"]:
+        item = _next_tg_item()
+        if item is None:
+            _TG_WORKERS["event"].wait(0.5)
+            continue
+
+        # 全局退避：网络不通时所有通知一起等，不让某一条卡住后面所有消息
+        while not _TG_WORKERS["stop"] and time.time() < _TG_GATE["until"]:
+            _TG_WORKERS["event"].wait(0.5)
+        if _TG_WORKERS["stop"]:
+            break
+
+        item["tries"] += 1
+        ok, err = _tg_send_once(item)
+        if ok:
+            _TG_STATS["sent"] += 1
+            _TG_GATE["until"] = 0.0
+            _TG_GATE["backoff"] = 1.5
+            continue
+
+        age = int(time.time() - item["ts"])
+        if item["tries"] <= 2 or item["tries"] % 8 == 0:
+            logger.warning(f"[TG] 发送失败（第 {item['tries']} 次，已排队 {age} 秒）: {err}")
+        if age > TG_QUEUE_KEEP:
+            logger.error(f"[TG] 通知排队超过 {TG_QUEUE_KEEP // 60} 分钟仍未送达，放弃："
+                         f"{str(item.get('payload'))[:50]}")
+            _TG_STATS["dropped"] += 1
+            continue
+
+        _requeue_tg_item(item)
+        _TG_GATE["until"] = time.time() + _TG_GATE["backoff"]
+        _TG_GATE["backoff"] = min(30.0, _TG_GATE["backoff"] * 2)
+
+
+def _tg_receiver_loop():
+    """后台接收线程：长轮询 getUpdates，把指令放进本地队列"""
+    if not TELEGRAM_BOT_TOKEN:
         return
+    offset = prime_telegram_offset()
+    if offset:
+        TG_OFFSET["value"] = offset
+    bad_rounds = 0
+    while not _TG_WORKERS["stop"]:
+        try:
+            command, target_id, new_offset = check_telegram_command(
+                offset=TG_OFFSET["value"], long_poll=True)
+        except Exception as e:
+            logger.debug(f"[TG] 接收线程异常: {e}")
+            command, target_id, new_offset = None, None, None
+        if new_offset:
+            TG_OFFSET["value"] = new_offset
+        if command:
+            bad_rounds = 0
+            with _TG_QUEUE_LOCK:
+                if len(_TG_QUEUE) >= _TG_QUEUE_MAX:
+                    _TG_QUEUE.pop(0)
+                _TG_QUEUE.append((command, target_id))
+            logger.info(f"[指令] 已排队: {command} ({target_id})")
+        elif _TG_NET["down"]:
+            bad_rounds += 1
+            _TG_WORKERS["event"].wait(min(30, 2 * bad_rounds))
+        else:
+            bad_rounds = 0
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "caption": formatted_caption, "parse_mode": "HTML"}
 
-    for attempt in range(1, TG_MAX_RETRIES + 1):
-        files = {"photo": ("screen.png", image_bytes, "image/png")}
-        resp, err = _tg_call("POST", url, retries=1, data=data, files=files, timeout=40)
-        if resp is not None and resp.status_code == 200:
+def start_tg_workers():
+    """启动 Telegram 收发线程（幂等；没有 token 就什么都不做）"""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    with _TG_WORKERS["lock"]:
+        if _TG_WORKERS["started"]:
             return
-        if resp is not None and resp.status_code not in (429, 500, 502, 503, 504):
-            logger.warning(f"[TG截图] 发送失败（HTTP {resp.status_code}）: {_tg_error_detail(resp)}")
-            return
-        if attempt < TG_MAX_RETRIES:
-            time.sleep(TG_RETRY_DELAY * attempt)
+        _TG_WORKERS["started"] = True
+        _TG_WORKERS["stop"] = False
+        if _TG_WORKERS["event"] is None:
+            _TG_WORKERS["event"] = threading.Event()
+        threading.Thread(target=_tg_sender_loop, daemon=True, name="tg-sender").start()
+        threading.Thread(target=_tg_receiver_loop, daemon=True, name="tg-receiver").start()
+        logger.info("[TG] 收发线程已启动：抢票主流程不再等待 Telegram")
 
-    logger.error("[TG截图] 所有重试均失败，截图未送达")
+
+def tg_queue_size():
+    """还有多少条通知没发出去"""
+    return _TG_TEXT_Q.qsize() + _TG_PHOTO_Q.qsize()
+
+
+def _tg_flush(seconds=6):
+    """退出前尽量把队列里的通知发出去（尽力而为）"""
+    if not _TG_WORKERS["started"]:
+        return
+    deadline = time.time() + seconds
+    while time.time() < deadline and tg_queue_size() > 0:
+        time.sleep(0.3)
+    left = tg_queue_size()
+    if left:
+        logger.warning(f"[TG] 退出时仍有 {left} 条通知未送达")
 
 
 BOT_START_TS = int(time.time())
@@ -397,11 +538,6 @@ def prime_telegram_offset():
     except Exception as e:
         logger.debug(f"[TG] 解析 getUpdates 失败: {e}")
     return None
-
-
-def flush_telegram_updates():
-    """清空之前的历史指令，防止一开机就执行以前的 /logout 导致自杀"""
-    return prime_telegram_offset()
 
 
 TELEGRAM_COMMANDS = {
@@ -665,47 +801,55 @@ def tick(page=None, phase=None, force_shot=False):
         return False
     if check_remote_stop_command():
         return False
-    if page is not None and SCREENSHOT_INTERVAL > 0:
+    _publish_state_throttled()
+    if page is not None:
         try:
-            publish_screenshot(page, force=force_shot, interval=SCREENSHOT_INTERVAL,
-                               meta_extra={"phase": BOT_STATE.get("phase", ""),
-                                           "round": BOT_STATE.get("round", 0),
-                                           "pid": os.getpid(),
-                                           "telegram": "down" if _TG_NET["down"] else "ok"})
+            # 没人在看 /remote 时 publish_screenshot 会直接返回，不浪费抢票时间
+            publish_screenshot(page, force=force_shot,
+                               interval=SCREENSHOT_INTERVAL if SCREENSHOT_INTERVAL > 0 else 3.0)
         except Exception:
             pass
-    poll_telegram_queue()
     return True
 
 
-def poll_telegram_queue(force=False):
-    """把 Telegram 指令收进队列（不在流程中间直接执行，避免打断选座/付款）"""
-    global _TG_LAST_POLL
-    if not TELEGRAM_BOT_TOKEN:
-        return
-    now = time.time()
-    if not force and now - _TG_LAST_POLL < 3:
-        return
-    _TG_LAST_POLL = now
-    try:
-        command, target_id, new_offset = check_telegram_command(offset=TG_OFFSET["value"])
-    except Exception as e:
-        logger.debug(f"[TG] 收取指令失败: {e}")
-        return
-    if new_offset:
-        TG_OFFSET["value"] = new_offset
-    if not command:
-        return
+def pending_telegram_count():
+    """本地待处理指令数量（不联网）"""
     with _TG_QUEUE_LOCK:
-        if len(_TG_QUEUE) >= _TG_QUEUE_MAX:
-            _TG_QUEUE.pop(0)
-        _TG_QUEUE.append((command, target_id))
-    logger.info(f"[指令] 已排队: {command} ({target_id})")
+        return len(_TG_QUEUE)
+
+
+def drop_pending_telegram(why=""):
+    """丢弃本地队列里还没处理的指令（进入付款待命前用，避免执行很久以前的旧指令）"""
+    with _TG_QUEUE_LOCK:
+        n = len(_TG_QUEUE)
+        _TG_QUEUE.clear()
+    if n:
+        logger.info(f"[TG] 丢弃 {n} 条待处理旧指令{(' - ' + why) if why else ''}")
+    return n
 
 
 def next_telegram_command():
     with _TG_QUEUE_LOCK:
         return _TG_QUEUE.pop(0) if _TG_QUEUE else (None, None)
+
+
+_LAST_STATE_PUB = {"ts": 0.0, "phase": None}
+
+
+def _publish_state_throttled():
+    """把阶段/轮数/pid/TG状态写进 meta（不截图，很便宜，但也要限流）"""
+    now = time.time()
+    phase = BOT_STATE.get("phase", "")
+    if phase == _LAST_STATE_PUB["phase"] and now - _LAST_STATE_PUB["ts"] < 3:
+        return
+    _LAST_STATE_PUB["ts"] = now
+    _LAST_STATE_PUB["phase"] = phase
+    try:
+        publish_state(phase=phase, round_no=BOT_STATE.get("round", 0),
+                      extra={"pid": os.getpid(),
+                             "telegram": "down" if _TG_NET["down"] else "ok"})
+    except Exception:
+        pass
 
 
 def sleep_s(seconds, page=None, phase=None):
@@ -720,16 +864,56 @@ def sleep_s(seconds, page=None, phase=None):
         time.sleep(min(0.5, remaining))
 
 
+_IS_VISIBLE_JS = """(sels) => {
+    for (const s of sels) {
+        try {
+            const el = document.querySelector(s);
+            if (el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)) return s;
+        } catch (e) { /* 选择器不是标准 CSS（Playwright 专有语法）就跳过 */ }
+    }
+    return null;
+}"""
+
+
 def wait_visible(page, selector, timeout=10, label=None):
-    """分片等待元素可见：等待期间依旧能响应停止/远程面板，不会整段卡死"""
+    """分片等待元素可见：等待期间依旧能响应停止/远程面板，不会整段卡死
+
+    每次轮询只做一次 CDP 往返（旧实现每次 count + is_visible 两次往返，
+    Windows 上这些往返就是"慢"的主要来源）。
+    """
     deadline = time.time() + max(0.0, float(timeout))
-    try:
-        loc = page.locator(selector).first
-    except Exception:
-        return False
+    loc = None
     while True:
         try:
-            if loc.count() and loc.is_visible():
+            if page.evaluate(_IS_VISIBLE_JS, [selector]):
+                return True
+        except Exception:
+            # JS 判不了（比如选择器带 Playwright 语法）就退回 locator
+            try:
+                if loc is None:
+                    loc = page.locator(selector).first
+                if loc.count() and loc.is_visible():
+                    return True
+            except Exception:
+                pass
+        if time.time() >= deadline:
+            return False
+        if not tick(page):
+            return False
+        time.sleep(0.25)
+
+
+def wait_any(page, selectors, timeout=10):
+    """任意一个选择器可见就返回（一次 JS 判断全部，省掉 N 次往返）"""
+    deadline = time.time() + max(0.0, float(timeout))
+    selectors = list(selectors)
+    while True:
+        try:
+            if page.evaluate(
+                """(sels) => sels.some(s => {
+                    const el = document.querySelector(s);
+                    return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+                })""", selectors):
                 return True
         except Exception:
             pass
@@ -737,7 +921,7 @@ def wait_visible(page, selector, timeout=10, label=None):
             return False
         if not tick(page):
             return False
-        time.sleep(0.3)
+        time.sleep(0.25)
 
 
 def page_report(page):
@@ -1260,17 +1444,21 @@ def perform_search(page, config):
         logger.info("[搜索] 结果为空")
         return False
 
-    target_index = None
-    for i in range(rows.count()):
-        row = rows.nth(i)
-        try:
-            if config['time'] in row.inner_text():
-                target_index = i
-                break
-        except Exception:
-            continue
+    # 一次 JS 在浏览器里把所有行扫完（旧实现逐行 inner_text，每行一次往返，实测拖 20+ 秒）
+    try:
+        target_index = page.evaluate(
+            """(t) => {
+                const rows = [...document.querySelectorAll('.depart-trips > tr')];
+                for (let i = 0; i < rows.length; i++) {
+                    if ((rows[i].innerText || '').includes(t)) return i;
+                }
+                return -1;
+            }""", config['time'])
+    except Exception as e:
+        logger.debug(f"[搜索] 扫描车次行失败: {e}")
+        target_index = -1
 
-    if target_index is None:
+    if target_index is None or target_index < 0:
         logger.info(f"[搜索] 未找到 {config['time']} 的车次")
         return False
 
@@ -1307,7 +1495,9 @@ SEAT_SCAN_JS = r"""() => {
         label: b.getAttribute('data-coach-label') || '',
         avail: b.getAttribute('data-coach-seat-available') || '?'
     }));
-    return { seats, coaches };
+    const paxEl = document.querySelector('#fixedPax');
+    const pax = paxEl ? (parseInt(paxEl.value, 10) || 1) : 1;
+    return { seats, coaches, pax };
 }"""
 
 
@@ -1412,14 +1602,14 @@ def select_seat(page, train_mode="auto"):
     time.sleep(0.5)
     handle_popup(page)
 
-    try:
-        pax = max(1, int(page.locator("#fixedPax").first.input_value()))
-    except Exception:
-        pax = 1
-
     data = page.evaluate(SEAT_SCAN_JS)
     seats = data.get('seats', [])
     coaches = data.get('coaches', [])
+    # 人数顺便在同一个 JS 里读掉（旧实现单独读 #fixedPax，元素不存在时要干等 20 秒默认超时）
+    try:
+        pax = max(1, int(data.get('pax') or 1))
+    except Exception:
+        pax = 1
     logger.info(f"[选座] 车厢情况: {[(c['label'], c['avail']) for c in coaches]}")
 
     if not seats:
@@ -1519,27 +1709,44 @@ def select_seat(page, train_mode="auto"):
         report_stuck(page, f"选座确认按钮未启用（已选 {len(chosen)}/{pax} 个座位）")
         return False
 
+    t_click = time.time()
     try:
         confirm.click()
     except Exception as e:
         logger.warning(f"[选座] 点击确认按钮失败: {e}")
         return False
 
+    # 轮询订座结果，一成功立刻往下走
+    # （旧实现先干等 bookingData 15 秒、再等按钮 8 秒 —— 实测白等 23 秒）
     booked = False
-    try:
-        page.wait_for_function(
-            "() => { const b = document.getElementById('bookingData'); return b && b.value && b.value.length > 0; }",
-            timeout=15000,
-        )
-        booked = True
-    except Exception:
-        logger.warning("[选座] 等待订座结果超时")
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        try:
+            state = page.evaluate(
+                """() => {
+                    const b = document.getElementById('bookingData');
+                    const btn = document.querySelector('.btn-passenger');
+                    return {
+                        hasData: !!(b && b.value && b.value.length > 0),
+                        visible: !!(btn && (btn.offsetWidth || btn.offsetHeight || btn.getClientRects().length))
+                    };
+                }"""
+            )
+            if state.get('hasData') or state.get('visible'):
+                booked = True
+                break
+        except Exception:
+            pass
+        if not tick(page):
+            return False
+        time.sleep(0.25)
+
+    if booked:
+        logger.info(f"[选座] 订座完成（等待 {time.time() - t_click:.1f} 秒）")
     handle_popup(page)
 
-    if wait_visible(page, ".btn-passenger", timeout=8, label="乘客信息按钮"):
+    if not booked and wait_visible(page, ".btn-passenger", timeout=3, label="乘客信息按钮"):
         booked = True
-    else:
-        logger.warning("[选座] 订座后未出现乘客信息按钮（订座可能没生效）")
 
     if not booked:
         report_stuck(page, "选座确认后既没有拿到订座数据，也没出现乘客信息按钮")
@@ -1823,6 +2030,41 @@ def enlarge_and_shot(page, caption):
             pass
 
 
+def collect_payment_links(page, *extra_urls):
+    """收集能重新打开付款页的链接
+
+    v1.3.3：实测"点完 PAY 之后"那个 viewqr.php 是裸网址，发过去打不开；
+    真正有用的是**点击 PAY 之前**的网关网址（带订单参数的付款页）。
+    这里把点击前后的网址、以及页面上二维码图片的网址一起收集起来。
+    """
+    links = []
+
+    def add(u):
+        u = (u or "").strip()
+        if u.startswith("http") and u not in links:
+            links.append(u)
+
+    for u in extra_urls:
+        add(u)
+    try:
+        add(page.url)
+    except Exception:
+        pass
+    try:
+        for u in page.evaluate("""() => {
+            const out = [];
+            document.querySelectorAll('img').forEach(img => {
+                const s = img.src || '';
+                if (/qr/i.test(s) && !/^data:/.test(s)) out.push(s);
+            });
+            return out.slice(0, 3);
+        }""") or []:
+            add(u)
+    except Exception:
+        pass
+    return links
+
+
 def execute_payment_command(page, context, command, target_id):
     """执行支付指令"""
     if target_id != "all" and target_id != BOT_ID:
@@ -1845,33 +2087,41 @@ def execute_payment_command(page, context, command, target_id):
         except Exception:
             before_ids = set()
 
-        if command == "/duitnow":
-            send_notification("💳 正在生成 DuitNow...")
-            gateway_page = go_to_payment_gateway(
-                page, context, ["#btnGoPaymentDuitNow", "div:has-text('DuitNow QR')", "button:has-text('DuitNow')"], "DuitNow")
-            if gateway_page is None:
-                return False
-            gateway_page = acquire_gateway_page(context, page, before_ids)
-            gateway_page = click_gateway_pay(context, gateway_page, before_ids)
-            latest = last_new_page(context, before_ids)
-            if latest is not None and latest is not gateway_page:
-                gateway_page = latest
-            enlarge_and_shot(gateway_page, "⚡️ DuitNow 请扫码")
-            send_notification(f"🔗 链接:\n{gateway_page.url}")
-            return False
+        if command in ("/duitnow", "/tng"):
+            is_tng = (command == "/tng")
+            label = "TnG" if is_tng else "DuitNow"
+            if is_tng:
+                buttons = ["#btnGoPaymentTnG", "div:has-text('Touch')", "button:has-text('TnG')"]
+            else:
+                buttons = ["#btnGoPaymentDuitNow", "div:has-text('DuitNow QR')", "button:has-text('DuitNow')"]
 
-        if command == "/tng":
-            send_notification("💳 正在生成 TnG...")
-            gateway_page = go_to_payment_gateway(
-                page, context, ["#btnGoPaymentTnG", "div:has-text('Touch')", "button:has-text('TnG')"], "TnG")
+            send_notification(f"💳 正在生成 {label}...")
+            gateway_page = go_to_payment_gateway(page, context, buttons, label)
             if gateway_page is None:
                 return False
             gateway_page = acquire_gateway_page(context, page, before_ids)
+
+            # 先把"点开就能付款"的网关网址发出去
+            # （点 PAY 之后的 viewqr.php 是二维码展示页，单独发过去通常打不开）
+            pay_url = ""
+            try:
+                pay_url = gateway_page.url or ""
+            except Exception:
+                pass
+            if pay_url.startswith("http"):
+                logger.info(f"[支付] 点击付款前的网关网址: {pay_url}")
+                send_notification(
+                    f"🔗 <b>{label} 付款页链接</b>（先存这个，点开就是付款页）:\n{pay_url}")
+
             gateway_page = click_gateway_pay(context, gateway_page, before_ids)
             latest = last_new_page(context, before_ids)
             if latest is not None and latest is not gateway_page:
                 gateway_page = latest
-            enlarge_and_shot(gateway_page, "⚡️ TnG 请扫码")
+
+            links = collect_payment_links(gateway_page, pay_url)
+            if links:
+                send_notification(f"🔗 <b>{label} 付款链接</b>:\n" + "\n".join(links))
+            enlarge_and_shot(gateway_page, f"⚡️ {label} 请扫码" + (f"\n\n🔗 {pay_url}" if pay_url else ""))
             return False
 
         if command == "/wallet":
@@ -1943,11 +2193,7 @@ def handle_remote_control(page):
     """
     global SHOULD_LOGOUT_AND_EXIT
     try:
-        if SCREENSHOT_INTERVAL > 0:
-            tick(page)
-        else:
-            publish_screenshot(page, force=True, interval=0,
-                               meta_extra={"phase": BOT_STATE.get("phase", "")})
+        tick(page)
         remote_cmd = get_command()
         if not remote_cmd:
             return
@@ -1962,8 +2208,7 @@ def handle_remote_control(page):
         logger.info(f"[远程控制] 执行结果: {result}")
         send_result(remote_cmd.get('id'), result.get('status'), result.get('message'))
         try:
-            publish_screenshot(page, force=True, interval=0,
-                               meta_extra={"phase": BOT_STATE.get("phase", "")})
+            publish_screenshot(page, force=True, interval=0)
         except Exception:
             pass
     except Exception as e:
@@ -1998,10 +2243,8 @@ def wait_for_payment_command(page, context):
     )
     send_notification(msg)
 
-    # 关键：进入待命前先丢弃积压的旧消息（否则很久以前发的 /manual 会被当成新指令执行）
-    last_offset = prime_telegram_offset()
-    if last_offset:
-        TG_OFFSET["value"] = last_offset
+    # 关键：进入待命前先丢弃本地还排着队的旧指令（很久以前发的 /manual 不该这时才执行）
+    drop_pending_telegram("进入付款待命")
 
     deadline = time.time() + 20 * 60
     while time.time() < deadline:
@@ -2012,10 +2255,9 @@ def wait_for_payment_command(page, context):
         if SHOULD_LOGOUT_AND_EXIT:
             return False
 
-        poll_telegram_queue(force=True)
         command, target_id = next_telegram_command()
         if not command:
-            if not sleep_s(2, page):
+            if not sleep_s(0.6, page):
                 return False
             continue
 
@@ -2063,7 +2305,6 @@ def manual_hold(page):
         handle_remote_control(page)
         if SHOULD_LOGOUT_AND_EXIT:
             return False
-        poll_telegram_queue()
         command, target_id = next_telegram_command()
         if command:
             logger.info(f"[指令] 收到 {command} ({target_id})")
@@ -2109,6 +2350,20 @@ def click_first(page, selectors, timeout=5000, required=True, label="", retries=
     for attempt in range(1, retries + 1):
         if not tick(page):
             return False
+
+        # 快路径：一次 JS 找出可见元素，再点它（比逐个 locator.count()/is_visible() 少一半往返）
+        try:
+            visible_sel = page.evaluate(_IS_VISIBLE_JS, selectors)
+        except Exception:
+            visible_sel = None
+        if visible_sel:
+            try:
+                page.locator(visible_sel).first.click(timeout=3000)
+                logger.debug(f"[点击] {label or visible_sel} -> {visible_sel}")
+                return True
+            except Exception:
+                pass
+
         for sel in selectors:
             try:
                 loc = page.locator(sel).first
@@ -2242,12 +2497,10 @@ def handle_passenger_and_payment(page, context, train_mode="auto"):
         if not click_first(page, [".btn-passenger"], timeout=10000, label="乘客信息按钮"):
             logger.error("[填表] 找不到 .btn-passenger 按钮")
             return False
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=15000)
-        except Exception:
-            pass
-        wait_visible(page, "#btnConfirmPayment", timeout=15, label="乘客页确认按钮")
-        sleep_s(1, page)
+        # 乘客页哪个元素先出现就用哪个（旧实现串行等 load_state 15 秒 + 元素 15 秒）
+        if not wait_any(page, ["#btnConfirmPayment", "select.TicketTypeId", ".IsSelf"], timeout=15):
+            report_stuck(page, "点了乘客信息按钮后乘客页没有出来")
+            return False
         handle_popup(page)
 
         # 2) 勾选本人 + 票种
@@ -2260,7 +2513,7 @@ def handle_passenger_and_payment(page, context, train_mode="auto"):
                     break
             except Exception as e:
                 logger.debug(f"[填表] 勾选 {sel} 失败: {e}")
-        sleep_s(1, page)
+        sleep_s(0.6, page)
 
         try:
             ttype = page.locator("select.TicketTypeId, select[id*='TicketTypeId']").first
@@ -2276,9 +2529,8 @@ def handle_passenger_and_payment(page, context, train_mode="auto"):
         # 3) 确认乘客
         if not click_first(page, ["#btnConfirmPayment"], timeout=10000, label="确认乘客"):
             return False
-        sleep_s(2, page)
 
-        # 4) 一路推进到付款页（新旧车型流程不同，统一用状态驱动）
+        # 4) 一路推进到付款页（advance_to_payment_page 自己会等，不用先盲等 2 秒）
         if not advance_to_payment_page(page):
             logger.error("[填表] 未能到达付款方式选择页")
             cancel_booking(page)
@@ -2310,10 +2562,10 @@ def run(playwright: Playwright) -> None:
     except Exception:
         pass
 
-    # 开机立刻清空历史 Telegram 指令，防止一开机就执行以前的 /logout 导致自杀
-    tg_offset = flush_telegram_updates()
-    TG_OFFSET["value"] = tg_offset
+    # Telegram 收发全部丢到后台线程：网络再烂也不会让抢票流程等一秒
+    # （接收线程会先 prime 掉开机前积压的旧指令，等价于原来的 flush）
     _LAST_TICK["ts"] = time.time()
+    start_tg_workers()
 
     browser = None
     context = None
@@ -2604,6 +2856,10 @@ def run(playwright: Playwright) -> None:
         BOT_STATE["running"] = False
         BOT_STATE["phase"] = "已退出"
         _raw_log("[系统] 检测到退出，开始清理...")
+        try:
+            _tg_flush(6)
+        except Exception:
+            pass
         try:
             import remote_control
             remote_control.cleanup()
