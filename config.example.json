@@ -21,7 +21,8 @@
         "telegram_chat_id": "your_chat_id_here",
         "heartbeat_screenshot": true,
         "telegram_proxy": "",
-        "telegram_proxy_enabled": false
+        "telegram_proxy_enabled": false,
+        "telegram_api_base": ""
     },
     "preferences": {
         "prefer_normal_seat": true,

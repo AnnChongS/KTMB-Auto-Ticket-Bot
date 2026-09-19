@@ -45,7 +45,8 @@ CONFIG_PATH = os.path.join(ROOT, "config.json")
 TG_HOST = "api.telegram.org"
 TG_PORT = 443
 WARP_MSI_URL = "https://downloads.cloudflareclient.com/v1/download/windows/ga"
-DEFAULT_WARP_PORT = 40000          # warp-cli proxy port 默认值
+DEFAULT_WARP_PORT = 40000
+DEFAULT_API_BASE = "https://api.telegram.org"          # warp-cli proxy port 默认值
 WARP_CLI_CANDIDATES = (
     r"C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe",
     r"C:\Program Files (x86)\Cloudflare\Cloudflare WARP\warp-cli.exe",
@@ -316,6 +317,38 @@ def enable_warp_proxy(port=DEFAULT_WARP_PORT, auto_install=False, wait_seconds=4
 
 # ============================ 3. 测试代理 ============================
 
+def test_api_base(base, token=None, timeout=12):
+    """测自建反代（Cloudflare Worker 等）：直接 GET {base}/bot<token>/getMe"""
+    base = (base or "").strip().rstrip("/")
+    if not base:
+        return False, "没有填写反代地址"
+    url = base + "/"
+    if token:
+        url = "%s/bot%s/getMe" % (base, token)
+    try:
+        import requests
+    except Exception:
+        return False, "本机没有 requests 库"
+    try:
+        r = requests.get(url, timeout=timeout)
+    except Exception as e:
+        return False, "反代连不上 -> %s: %s" % (type(e).__name__, str(e)[:150])
+    if r.status_code == 200:
+        if token:
+            try:
+                d = r.json()
+                if d.get("ok"):
+                    u = d.get("result", {})
+                    return True, "反代可用 ✅ 机器人：@%s（%s）" % (u.get("username"), u.get("first_name"))
+                return False, "反代通了，但 Telegram 返回错误：%s" % str(d.get("description"))[:120]
+            except Exception:
+                pass
+        return True, "反代可用 ✅（HTTP 200）"
+    if r.status_code in (301, 302, 401, 404, 409):
+        return True, "反代可用 ✅（HTTP %d，说明路是通的）" % r.status_code
+    return False, "反代返回 HTTP %d" % r.status_code
+
+
 def test_proxy(proxy_url, token=None, timeout=12):
     """用给定代理真的请求一次 api.telegram.org，返回 (ok, 说明)"""
     if not proxy_url:
@@ -393,6 +426,24 @@ def get_proxy_setting(cfg=None):
     return bool(enabled), url
 
 
+def get_api_base(cfg=None):
+    """自建反代地址（空 = 用官方 api.telegram.org）"""
+    env = (os.environ.get("KTMB_TG_API_BASE") or "").strip()
+    if env:
+        return env.rstrip("/")
+    cfg = cfg if cfg is not None else read_config()
+    n = cfg.get("notification", {}) or {}
+    return ((n.get("telegram_api_base") or "").strip()).rstrip("/")
+
+
+def set_api_base(base):
+    cfg = read_config()
+    n = cfg.setdefault("notification", {})
+    n["telegram_api_base"] = (base or "").strip().rstrip("/")
+    write_config(cfg)
+    return n["telegram_api_base"]
+
+
 def set_proxy_setting(url, enabled=True):
     cfg = read_config()
     n = cfg.setdefault("notification", {})
@@ -413,6 +464,13 @@ def _menu_offer():
     if st["reachable"]:
         print("[TG 检测] Telegram 直连正常（%s），跳过代理设置" % st["detail"])
         return 0
+    base_now = get_api_base()
+    if base_now:
+        ok_b, msg_b = test_api_base(base_now)
+        if ok_b:
+            print("[TG 检测] 直连不通（%s），但自建反代可用：%s" % (st["detail"], msg_b))
+            return 0
+        print("[TG 检测] 反代 %s 目前不可用：%s" % (base_now, msg_b))
 
     print("=" * 62)
     print("  ⚠️  检测到连不上 Telegram（api.telegram.org）")
@@ -420,15 +478,26 @@ def _menu_offer():
     print("      影响：抢票、远程控制都正常，只是收不到 TG 通知和指令")
     print("=" * 62)
     print("  [1] 安装/启用 Cloudflare WARP，只让 Telegram 走它（推荐，需管理员）")
-    print("  [2] 我自己有代理（Clash / VPS 等），现在填地址")
-    print("  [3] 跳过（以后可以在网页面板的「通知」页里设置）")
+    print("  [2] 我自己有代理（Clash / VPS 的 HTTP/SOCKS5 地址）")
+    print("  [3] 我有自建反代域名（Cloudflare Worker 等，不用装任何软件）")
+    print("  [4] 跳过（以后可以在网页面板的「通知」页里设置）")
     try:
-        choice = (input("  请选择 [1/2/3]，直接回车 = 3 ：") or "3").strip()
+        choice = (input("  请选择 [1/2/3/4]，直接回车 = 4 ：") or "4").strip()
     except Exception:
         return 0
     print("")
 
     if choice == "1":
+        if find_warp_cli() and not port_listening("127.0.0.1", DEFAULT_WARP_PORT):
+            print("  注意：你的 WARP 已经安装。这一步会把它切换成「代理模式」——")
+            print("        只有 Telegram 走代理；如果你平时用 WARP 全局上网，全局接管会停掉。")
+            try:
+                go = (input("  继续吗？[Y/n]：") or "y").strip().lower()
+            except Exception:
+                go = "y"
+            if go.startswith("n"):
+                print("  [取消] 没有改动你的 WARP 设置。")
+                return 0
         ok, msg = enable_warp_proxy(auto_install=True)
         print("[WARP] %s" % msg)
         if ok:
@@ -468,6 +537,30 @@ def _menu_offer():
                 print("  已保存（抢票不受影响，收不到通知时再回来调整）")
         return 0
 
+    if choice == "3":
+        print("  例：https://tg.你的域名.com/密钥  （程序会自动拼上 /bot<token>/方法名）")
+        try:
+            base = (input("  反代地址：") or "").strip()
+        except Exception:
+            return 0
+        if not base:
+            print("[跳过] 没有填写")
+            return 0
+        ok_b, msg_b = test_api_base(base)
+        print("[测试] %s" % msg_b)
+        if ok_b:
+            set_api_base(base)
+            print("  ✅ 已写入配置：notification.telegram_api_base = %s" % base)
+        else:
+            try:
+                save = (input("  测试没通过，仍然保存吗？[y/N]：") or "n").strip().lower()
+            except Exception:
+                save = "n"
+            if save.startswith("y"):
+                set_api_base(base)
+                print("  已保存（抢票不受影响）")
+        return 0
+
     print("  [跳过] 已跳过，抢票功能不受影响。")
     return 0
 
@@ -485,7 +578,12 @@ def cmd_status():
         "warp_port_listening": w["proxy_listening"],
         "platform": platform.system(),
     }
-    if url:
+    base_cfg = get_api_base()
+    out["api_base"] = base_cfg or DEFAULT_API_BASE
+    if base_cfg:
+        ok_b, msg_b = test_api_base(base_cfg)
+        out["api_base_test_ok"], out["api_base_test_msg"] = ok_b, msg_b
+    elif url:
         ok, msg = test_proxy(url)
         out["proxy_test_ok"], out["proxy_test_msg"] = ok, msg
     print(json.dumps(out, ensure_ascii=False))
@@ -525,6 +623,28 @@ def main(argv):
             set_proxy_setting(url, True)
             print("[配置] 已写入 config.json：%s" % url)
         return 0 if ok else 1
+    if cmd == "set-base":
+        base = argv[2] if len(argv) > 2 else ""
+        if not base:
+            print("用法: proxy_setup.py set-base https://tg.你的域名/密钥")
+            return 1
+        ok_b, msg_b = test_api_base(base)
+        print("[测试] %s" % msg_b)
+        set_api_base(base)
+        print("[配置] 已写入 config.json：notification.telegram_api_base = %s" % base)
+        return 0 if ok_b else 1
+    if cmd == "test-base":
+        base = argv[2] if len(argv) > 2 else get_api_base()
+        if not base:
+            print("[提示] 没有配置反代地址（notification.telegram_api_base）")
+            return 1
+        ok_b, msg_b = test_api_base(base)
+        print(("✅ " if ok_b else "❌ ") + msg_b)
+        return 0 if ok_b else 1
+    if cmd == "disable-base":
+        set_api_base("")
+        print("[配置] 已清空自建反代地址，改回官方 api.telegram.org")
+        return 0
     if cmd == "disable":
         set_proxy_setting("", False)
         print("[配置] 已关闭 Telegram 代理")

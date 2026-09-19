@@ -211,6 +211,11 @@ if _PROXY_ENABLED:
 else:
     TG_PROXY = ""
 TG_FORCE_IPV4 = str(os.environ.get("KTMB_TG_IPV4", "0")).strip().lower() in ("1", "true", "yes", "on")
+# 自建反代（Cloudflare Worker 等）：把 api.telegram.org 换成自己的域名。
+# 填法：https://tg.你的域名.com/密钥   （程序会自动拼上 /bot<token>/方法名）
+_TG_API_RAW = (os.environ.get("KTMB_TG_API_BASE")
+               or _NOTIF_CFG.get("telegram_api_base", "") or "").strip()
+TG_API_BASE = _TG_API_RAW.rstrip("/") if _TG_API_RAW else "https://api.telegram.org"
 
 _tg_local = threading.local()
 _TG_IPV4_DONE = {"done": False}
@@ -377,7 +382,7 @@ def send_telegram_photo(caption, image_bytes):
 
 def _tg_send_once(item):
     """发送一条；返回 (是否结束, 错误原因)"""
-    base = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    base = f"{TG_API_BASE}/bot{TELEGRAM_BOT_TOKEN}"
     if item["kind"] == "photo":
         resp, err = _tg_call("POST", base + "/sendPhoto", retries=1, timeout=(5, 45),
                              data={"chat_id": TELEGRAM_CHAT_ID,
@@ -498,6 +503,8 @@ def start_tg_workers():
         _TG_WORKERS["stop"] = False
         if _TG_WORKERS["event"] is None:
             _TG_WORKERS["event"] = threading.Event()
+        if TG_API_BASE != "https://api.telegram.org":
+            logger.info(f"[TG] 使用自定义 Telegram API 地址: {TG_API_BASE}")
         threading.Thread(target=_tg_sender_loop, daemon=True, name="tg-sender").start()
         threading.Thread(target=_tg_receiver_loop, daemon=True, name="tg-receiver").start()
         logger.info("[TG] 收发线程已启动：抢票主流程不再等待 Telegram")
@@ -544,7 +551,7 @@ def prime_telegram_offset():
     """只取 offset、丢弃积压的旧消息；绝不执行其中任何一条"""
     if not TELEGRAM_BOT_TOKEN:
         return None
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    url = f"{TG_API_BASE}/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     resp, err = _tg_call("GET", url, retries=2,
                          params={"timeout": 0, "allowed_updates": ["message"]}, timeout=15)
     if resp is None or resp.status_code != 200:
@@ -724,7 +731,7 @@ def check_telegram_command(offset=None, long_poll=False):
 
     wait_s = 20 if long_poll else 0
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+        url = f"{TG_API_BASE}/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
         params = {"timeout": wait_s, "allowed_updates": ["message"]}
         if offset:
             params["offset"] = offset

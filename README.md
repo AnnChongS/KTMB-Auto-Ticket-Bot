@@ -36,12 +36,45 @@ Ticket grabbing still works - you just get no notifications or commands. v1.3.4 
 
 | Where | What it does |
 |-------|--------------|
-| Launcher | **Probes** Telegram connectivity at startup (**no token needed**) and, only when it fails, asks: (1) install Cloudflare WARP for Telegram only (2) I already have a proxy (3) skip |
+| Launcher | **Probes** Telegram connectivity at startup (**no token needed**) and, only when it fails, asks: (1) install Cloudflare WARP for Telegram only (2) I already have a proxy (3) I have my own reverse proxy (Worker) (4) skip |
 | Web panel -> Alerts | "Enable Telegram proxy" switch + proxy URL + **Test proxy** (a real request) + **Enable WARP proxy mode** |
 | Ticket flow | The proxy is injected into the bot process for Telegram requests only; **KTMB, the browser and grabbing speed are untouched** |
 | Dependencies | New `PySocks` (required for SOCKS5, pure Python, 50KB). If missing, the bot logs it and falls back to direct |
 
 > **Off by default**: for everyone who does not need it, behaviour is unchanged.
+
+### Option: Cloudflare Worker reverse proxy (no software to install)
+
+If you have a Cloudflare account and a domain, this is the **easiest** route (no WARP, no admin rights, works from any machine):
+
+1. Cloudflare -> Workers & Pages -> Create -> Worker, paste:
+
+```js
+export default {
+  async fetch(request) {
+    const SECRET = "pick your own random string";
+    const url = new URL(request.url);
+    const prefix = "/" + SECRET;
+    if (!url.pathname.startsWith(prefix + "/bot")) return new Response("not found", { status: 404 });
+    const target = "https://api.telegram.org" + url.pathname.slice(prefix.length) + url.search;
+    const resp = await fetch(target, {
+      method: request.method,
+      headers: { "content-type": request.headers.get("content-type") || "application/json" },
+      body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
+    });
+    return new Response(resp.body, { status: resp.status,
+      headers: { "content-type": resp.headers.get("content-type") || "application/json" } });
+  },
+};
+```
+
+2. Worker -> Settings -> Domains & Routes -> Add -> Custom Domain, e.g. `tg.yourdomain.com`
+3. Test: `curl https://tg.yourdomain.com/SECRET/bot<TOKEN>/getMe` should return `"ok":true`
+4. Panel -> Alerts -> **Telegram API base** = `https://tg.yourdomain.com/SECRET` -> Test proxy -> Save
+
+> - **Always keep the secret path**, otherwise you publish the Telegram API for everyone
+> - Personal, low-volume use only; do not share the URL publicly
+> - Launcher menu: **option [3]**; CLI: `python proxy_setup.py set-base https://tg.yourdomain.com/SECRET`
 
 ### Why WARP "proxy mode"
 
@@ -56,6 +89,7 @@ We only use `proxy`, because it does **not** route KTMB traffic through Cloudfla
 | Clash / Clash Verge (mixed port) | `http://127.0.0.1:7890` |
 | v2rayN | `http://127.0.0.1:10809` |
 | Your own VPS (tinyproxy / 3proxy) | `http://YOUR_IP:3128` |
+| **Your own reverse proxy (Cloudflare Worker)** | **not here** - use the "Telegram API base" field, e.g. `https://tg.yourdomain.com/SECRET` |
 
 > The `h` in `socks5h://` means the proxy resolves the hostname (recommended). Plain `http://` works too.
 
@@ -132,6 +166,9 @@ python proxy_setup.py status       # config + WARP state + proxy test (JSON)
 python proxy_setup.py test         # request Telegram through the configured proxy
 python proxy_setup.py enable-warp  # install/enable WARP proxy mode + save config
 python proxy_setup.py disable      # turn the proxy setting off
+python proxy_setup.py set-base https://tg.yourdomain.com/SECRET  # configure a reverse proxy
+python proxy_setup.py test-base    # test the reverse proxy
+python proxy_setup.py disable-base # back to the official API
 ```
 
 **Turning it off**: uncheck "Enable Telegram proxy" in the panel (or run `proxy_setup.py disable`).
@@ -229,6 +266,7 @@ Click **Save** → **Start**, then wait for tickets 🎉
 | `heartbeat_screenshot` | Attach a screenshot to the heartbeat (true/false) |
 | `telegram_proxy` | Optional. Proxy for Telegram, e.g. `socks5h://127.0.0.1:40000` (panel/`proxy_setup.py` can set it up) |
 | `telegram_proxy_enabled` | Panel switch; when `false` even the `KTMB_TG_PROXY` env var is ignored |
+| `telegram_api_base` | Custom API base (Cloudflare Worker etc.), e.g. `https://tg.yourdomain.com/SECRET`; empty = official `api.telegram.org` |
 
 ---
 

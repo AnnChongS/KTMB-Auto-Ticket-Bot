@@ -413,6 +413,16 @@ def api_start():
             logger.info(f"机器人将使用 Telegram 代理: {proxy_url}")
         else:
             env.pop("KTMB_TG_PROXY", None)
+        # 自建反代（Cloudflare Worker 等）：直接换成 API 地址，和代理互不影响
+        try:
+            api_base = proxy_setup.get_api_base()
+        except Exception:
+            api_base = ""
+        if api_base:
+            env["KTMB_TG_API_BASE"] = api_base
+            logger.info(f"机器人将使用自建 Telegram 反代: {api_base}")
+        else:
+            env.pop("KTMB_TG_API_BASE", None)
         # 默认优先使用项目内的 browsers 目录，避免依赖全局 Playwright 缓存
         local_browsers = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browsers")
         if "PLAYWRIGHT_BROWSERS_PATH" not in env:
@@ -718,6 +728,7 @@ def api_proxy_status():
                     "proxy_listening": bool(host and port and proxy_setup.port_listening(host, port)),
                     "warp_installed": warp["installed"], "warp_cli": warp["cli"],
                     "warp_port_listening": warp["proxy_listening"],
+                    "api_base": proxy_setup.get_api_base() or proxy_setup.DEFAULT_API_BASE,
                     "platform": sys.platform})
 
 
@@ -740,15 +751,22 @@ def api_proxy_test():
         return jsonify({"status": "error", "message": "未认证"}), 401
     data = request.get_json(silent=True) or {}
     url = (data.get("url") or "").strip()
-    if not url:
+    base = (data.get("base") or "").strip()
+    if not url and not base:
+        base = proxy_setup.get_api_base()
         url = proxy_setup.get_proxy_setting()[1]
     cfg = load_config()
     token = ((cfg.get("notification", {}) or {}).get("telegram_token") or "").strip()
-    if url:
+    if base:
+        ok, msg = proxy_setup.test_api_base(base, token=token or None)
+        via = base
+    elif url:
         ok, msg = proxy_setup.test_proxy(url, token=token or None)
+        via = url
     else:
         ok, msg = proxy_setup._test_no_proxy(token=token or None)
-    return jsonify({"status": "success" if ok else "error", "message": msg, "ok": ok, "via": url or "直连"})
+        via = "直连"
+    return jsonify({"status": "success" if ok else "error", "message": msg, "ok": ok, "via": via})
 
 
 @app.route('/api/proxy/enable-warp', methods=['POST'])

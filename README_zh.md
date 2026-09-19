@@ -35,12 +35,45 @@
 
 | 位置 | 干什么 |
 |------|--------|
-| 启动脚本 | 启动时**自动探测** Telegram 连通性（**不需要 token**）；连不上才弹菜单问你：① 装 Cloudflare WARP 只给 TG 用 ② 我自己有代理 ③ 跳过 |
+| 启动脚本 | 启动时**自动探测** Telegram 连通性（**不需要 token**）；连不上才弹菜单问你：① 装 Cloudflare WARP 只给 TG 用 ② 我自己有代理 ③ 自建反代（Worker） ④ 跳过 |
 | 网页面板 → 通知 | 「启用 Telegram 代理」开关 + 代理地址框 + **测试代理**（真的请求一次）+ **一键开 WARP 代理** |
 | 抢票流程 | 只把代理注入机器人进程的 TG 请求；**KTMB 网站、浏览器、抢票速度完全不受影响** |
 | 依赖 | 新增 `PySocks`（SOCKS5 必需，纯 Python、50KB）；没装会自动降级直连并在日志里说清楚 |
 
 > **默认全关**：不用这个功能的用户，行为跟以前一模一样。
+
+### 方案：Cloudflare Worker 反代（不用装任何软件）
+
+如果你有 Cloudflare 账号和域名，这是**最省事**的方式（不用装 WARP、不用管理员、任何机器都能用）：
+
+1. Cloudflare → Workers & Pages → Create → Worker，粘贴：
+
+```js
+export default {
+  async fetch(request) {
+    const SECRET = "换成一串你自己的随机字符串";
+    const url = new URL(request.url);
+    const prefix = "/" + SECRET;
+    if (!url.pathname.startsWith(prefix + "/bot")) return new Response("not found", { status: 404 });
+    const target = "https://api.telegram.org" + url.pathname.slice(prefix.length) + url.search;
+    const resp = await fetch(target, {
+      method: request.method,
+      headers: { "content-type": request.headers.get("content-type") || "application/json" },
+      body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
+    });
+    return new Response(resp.body, { status: resp.status,
+      headers: { "content-type": resp.headers.get("content-type") || "application/json" } });
+  },
+};
+```
+
+2. Worker → Settings → Domains & Routes → Add → Custom Domain，填 `tg.你的域名.com`
+3. 测试：`curl https://tg.你的域名.com/密钥/bot<TOKEN>/getMe`，返回 `"ok":true` 就通了
+4. 面板「通知」页 → **Telegram API 地址** 填 `https://tg.你的域名.com/密钥` → 点「测试代理」→ 保存
+
+> - **一定要带那串密钥**，否则等于把 Telegram 接口公开给别人用
+> - 只适合自用小流量，别公开分享地址
+> - 启动脚本菜单里对应 **选项 [3]**；命令行：`python proxy_setup.py set-base https://tg.你的域名.com/密钥`
 
 ### 为什么用 WARP 的「代理模式」
 
@@ -55,6 +88,7 @@ WARP 客户端有三种模式：`warp`（全局接管）、`doh`（只换 DNS）
 | Clash / Clash Verge（混合端口） | `http://127.0.0.1:7890` |
 | v2rayN | `http://127.0.0.1:10809` |
 | 自己的 VPS（tinyproxy / 3proxy） | `http://你的IP:3128` |
+| **自建反代（Cloudflare Worker 等）** | **不填这一栏**，改填下面的「Telegram API 地址」，如 `https://tg.你的域名.com/密钥` |
 
 > `socks5h://` 的 **h** = 域名交给代理去解析（推荐）；写 `http://` 也可以。
 
@@ -133,6 +167,9 @@ python proxy_setup.py status       # 代理配置 + WARP 状态 + 代理能不�
 python proxy_setup.py test         # 用配置里的代理真的请求一次 Telegram
 python proxy_setup.py enable-warp  # 装/开 WARP 代理模式并写配置
 python proxy_setup.py disable      # 关掉代理配置
+python proxy_setup.py set-base https://tg.你的域名.com/密钥   # 配置自建反代
+python proxy_setup.py test-base    # 测自建反代
+python proxy_setup.py disable-base # 反代改回官方地址
 ```
 
 **关掉它**：面板「通知」页取消勾选「启用 Telegram 代理」并保存，或执行 `proxy_setup.py disable`。
@@ -230,6 +267,7 @@ python proxy_setup.py disable      # 关掉代理配置
 | `heartbeat_screenshot` | 心跳是否附带截图（true/false） |
 | `telegram_proxy` | 可选。Telegram 代理，如 `socks5h://127.0.0.1:40000`。可用 `proxy_setup.py` 或面板一键配置 |
 | `telegram_proxy_enabled` | 面板「启用 Telegram 代理」开关；`false` 时连环境变量 `KTMB_TG_PROXY` 都忽略 |
+| `telegram_api_base` | 自建反代地址（Cloudflare Worker 等），如 `https://tg.你的域名.com/密钥`；留空 = 官方 `api.telegram.org` |
 
 ---
 

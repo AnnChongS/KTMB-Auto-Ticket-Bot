@@ -382,6 +382,10 @@ h1{font-family:var(--f-display);font-weight:700;font-size:30px;letter-spacing:.0
           <div class="form-group" style="margin-top:10px">
             <input type="text" class="form-input" id="tg_proxy" placeholder="socks5h://127.0.0.1:40000 / http://127.0.0.1:7890" value="{{ config.get('notification', {}).get('telegram_proxy', '') }}">
           </div>
+          <div class="form-group" style="margin-top:10px">
+            <label class="form-label" data-i18n="tg_api_base">Telegram API 地址（可选，自建反代用）</label>
+            <input type="text" class="form-input" id="tg_api_base" placeholder="https://tg.你的域名/密钥" value="{{ config.get('notification', {}).get('telegram_api_base', '') }}">
+          </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button type="button" class="ghost-btn" onclick="probeTelegram()" data-i18n="tg_probe">检测连通性</button>
             <button type="button" class="ghost-btn" onclick="testProxy()" data-i18n="tg_test_proxy">测试代理</button>
@@ -481,6 +485,7 @@ var i18nDict = {
     tg_enable_warp: '一键开 WARP 代理',
     tg_probing: '正在检测 Telegram 连通性...',
     tg_testing: '正在通过代理请求 Telegram...',
+    tg_api_base: 'Telegram API 地址（可选，自建反代用）',
     tg_warp_working: '正在检查/安装 WARP 并开启代理模式（可能要 1-2 分钟）...',
     seat_prefs: '取票偏好 · 优先级从上到下',
     seat_aisle: '靠过道',
@@ -575,6 +580,7 @@ var i18nDict = {
     tg_enable_warp: 'Enable WARP proxy mode',
     tg_probing: 'Probing Telegram...',
     tg_testing: 'Requesting Telegram through the proxy...',
+    tg_api_base: 'Telegram API base (optional, for your own reverse proxy)',
     tg_warp_working: 'Checking/installing WARP and enabling proxy mode (1-2 min)...',
     seat_prefs: 'Seat Preference - priority top to bottom',
     seat_aisle: 'Aisle',
@@ -856,10 +862,11 @@ function probeTelegram() {
 }
 function testProxy() {
   var url = (document.getElementById('tg_proxy').value || '').trim();
+  var base = (document.getElementById('tg_api_base').value || '').trim();
   setProxyStatus(t('tg_testing'));
   fetch('/api/proxy/test', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: url })
+    body: JSON.stringify({ url: url, base: base })
   }).then(function (r) { return r.json(); }).then(function (d) {
     if (!d) { setProxyStatus('error', 'error'); return; }
     setProxyStatus((d.ok ? '✅ ' : '❌ ') + (d.message || '') + '  [' + (d.via || '') + ']', d.ok ? 'ok' : 'error');
@@ -900,7 +907,8 @@ function saveConfig() {
       telegram_chat_id: document.getElementById('tg_chat_id').value,
       heartbeat_screenshot: document.getElementById('tg_heartbeat_screenshot').checked,
       telegram_proxy: (document.getElementById('tg_proxy').value || '').trim(),
-      telegram_proxy_enabled: document.getElementById('tg_proxy_enabled').checked
+      telegram_proxy_enabled: document.getElementById('tg_proxy_enabled').checked,
+      telegram_api_base: (document.getElementById('tg_api_base').value || '').trim()
     },
     preferences: {
       prefer_normal_seat: document.getElementById('pref_normal').checked,
