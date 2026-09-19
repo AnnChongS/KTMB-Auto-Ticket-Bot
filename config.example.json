@@ -20,7 +20,8 @@
         "telegram_token": "your_bot_token_here",
         "telegram_chat_id": "your_chat_id_here",
         "heartbeat_screenshot": true,
-        "telegram_proxy": ""
+        "telegram_proxy": "",
+        "telegram_proxy_enabled": false
     },
     "preferences": {
         "prefer_normal_seat": true,

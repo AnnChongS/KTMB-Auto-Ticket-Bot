@@ -188,7 +188,7 @@ h1{font-family:var(--f-display);font-weight:700;font-size:30px;letter-spacing:.0
     <div class="brand-mark">KTMB</div>
     <div>
       <h1 data-i18n="title">抢票指挥官</h1>
-      <div class="brand-sub">Dispatch Console · v1.3.3</div>
+      <div class="brand-sub">Dispatch Console · v1.3.4</div>
     </div>
   </div>
   <div class="masthead-right">
@@ -370,6 +370,24 @@ h1{font-family:var(--f-display);font-weight:700;font-size:30px;letter-spacing:.0
             </div>
             <label class="switch"><input type="checkbox" id="tg_heartbeat_screenshot" {% if config.get('notification', {}).get('heartbeat_screenshot', False) %}checked{% endif %}><span class="track"></span></label>
           </div>
+
+          <div class="section-label" data-i18n="tg_proxy_title">Telegram 代理（连不上时用）</div>
+          <div class="rung" style="border:1px solid var(--line);border-radius:3px">
+            <div class="rung-body">
+              <div class="rung-title" data-i18n="tg_proxy_enable">启用 Telegram 代理</div>
+              <div class="rung-desc" data-i18n="tg_proxy_desc">只影响通知和指令；抢票、网页控制依旧直连，速度不变</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="tg_proxy_enabled" {% if config.get('notification', {}).get('telegram_proxy_enabled', True) and config.get('notification', {}).get('telegram_proxy', '') %}checked{% endif %}><span class="track"></span></label>
+          </div>
+          <div class="form-group" style="margin-top:10px">
+            <input type="text" class="form-input" id="tg_proxy" placeholder="socks5h://127.0.0.1:40000 / http://127.0.0.1:7890" value="{{ config.get('notification', {}).get('telegram_proxy', '') }}">
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button type="button" class="ghost-btn" onclick="probeTelegram()" data-i18n="tg_probe">检测连通性</button>
+            <button type="button" class="ghost-btn" onclick="testProxy()" data-i18n="tg_test_proxy">测试代理</button>
+            <button type="button" class="ghost-btn" onclick="enableWarp()" data-i18n="tg_enable_warp">一键开 WARP 代理</button>
+          </div>
+          <div id="proxy-status" class="panel-hint" style="margin-top:8px;white-space:pre-wrap">-</div>
         </div>
 
         <div class="tab-content" data-tab="4">
@@ -455,6 +473,15 @@ var i18nDict = {
     pay_command: 'Command (遥控指令 - 推荐)',
     pay_wallet: 'KTM Wallet (自动扣款)',
     heartbeat_screenshot: '心跳附带截图',
+    tg_proxy_title: 'Telegram 代理（连不上时用）',
+    tg_proxy_enable: '启用 Telegram 代理',
+    tg_proxy_desc: '只影响通知和指令；抢票、网页控制依旧直连，速度不变',
+    tg_probe: '检测连通性',
+    tg_test_proxy: '测试代理',
+    tg_enable_warp: '一键开 WARP 代理',
+    tg_probing: '正在检测 Telegram 连通性...',
+    tg_testing: '正在通过代理请求 Telegram...',
+    tg_warp_working: '正在检查/安装 WARP 并开启代理模式（可能要 1-2 分钟）...',
     seat_prefs: '取票偏好 · 优先级从上到下',
     seat_aisle: '靠过道',
     seat_aisle_desc: '最优先 (aisle seat)',
@@ -540,6 +567,15 @@ var i18nDict = {
     pay_command: 'Command (remote instruction - recommended)',
     pay_wallet: 'KTM Wallet (auto debit)',
     heartbeat_screenshot: 'Heartbeat with screenshot',
+    tg_proxy_title: 'Telegram proxy (when TG is unreachable)',
+    tg_proxy_enable: 'Enable Telegram proxy',
+    tg_proxy_desc: 'Affects notifications/commands only; ticket grabbing stays direct',
+    tg_probe: 'Probe connectivity',
+    tg_test_proxy: 'Test proxy',
+    tg_enable_warp: 'Enable WARP proxy mode',
+    tg_probing: 'Probing Telegram...',
+    tg_testing: 'Requesting Telegram through the proxy...',
+    tg_warp_working: 'Checking/installing WARP and enabling proxy mode (1-2 min)...',
     seat_prefs: 'Seat Preference - priority top to bottom',
     seat_aisle: 'Aisle',
     seat_aisle_desc: 'Highest priority',
@@ -804,6 +840,44 @@ function checkAuth(res) {
   if (res.status === 401) { window.location.href = '/login'; return null; }
   return res;
 }
+'// ==================== Telegram 代理 ====================
+function setProxyStatus(text, kind) {
+  var el = document.getElementById('proxy-status');
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = (kind === 'error') ? 'var(--red)' : (kind === 'ok' ? 'var(--green)' : '');
+}
+function probeTelegram() {
+  setProxyStatus(t('tg_probing'));
+  fetch('/api/proxy/probe').then(function (r) { return r.json(); }).then(function (d) {
+    if (!d || d.status !== 'success') { setProxyStatus((d && d.message) || 'error', 'error'); return; }
+    setProxyStatus(d.explain || '', d.telegram_reachable ? 'ok' : 'error');
+  }).catch(function (e) { setProxyStatus('' + e, 'error'); });
+}
+function testProxy() {
+  var url = (document.getElementById('tg_proxy').value || '').trim();
+  setProxyStatus(t('tg_testing'));
+  fetch('/api/proxy/test', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: url })
+  }).then(function (r) { return r.json(); }).then(function (d) {
+    if (!d) { setProxyStatus('error', 'error'); return; }
+    setProxyStatus((d.ok ? '✅ ' : '❌ ') + (d.message || '') + '  [' + (d.via || '') + ']', d.ok ? 'ok' : 'error');
+  }).catch(function (e) { setProxyStatus('' + e, 'error'); });
+}
+function enableWarp() {
+  setProxyStatus(t('tg_warp_working'));
+  fetch('/api/proxy/enable-warp', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+  }).then(function (r) { return r.json(); }).then(function (d) {
+    if (!d || d.status !== 'success') { setProxyStatus('❌ ' + ((d && d.message) || 'error'), 'error'); return; }
+    document.getElementById('tg_proxy').value = d.url || '';
+    document.getElementById('tg_proxy_enabled').checked = true;
+    setProxyStatus((d.test_ok ? '✅ ' : '⚠️ ') + (d.test_message || d.message || ''), d.test_ok ? 'ok' : 'error');
+    saveConfig();
+  }).catch(function (e) { setProxyStatus('' + e, 'error'); });
+}
+
 function saveConfig() {
   var taskList = syncTasksFromDOM();
   var problems = validateTasks(taskList);
@@ -824,7 +898,9 @@ function saveConfig() {
     notification: {
       telegram_token: document.getElementById('tg_token').value,
       telegram_chat_id: document.getElementById('tg_chat_id').value,
-      heartbeat_screenshot: document.getElementById('tg_heartbeat_screenshot').checked
+      heartbeat_screenshot: document.getElementById('tg_heartbeat_screenshot').checked,
+      telegram_proxy: (document.getElementById('tg_proxy').value || '').trim(),
+      telegram_proxy_enabled: document.getElementById('tg_proxy_enabled').checked
     },
     preferences: {
       prefer_normal_seat: document.getElementById('pref_normal').checked,

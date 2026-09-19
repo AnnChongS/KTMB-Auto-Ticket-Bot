@@ -1,6 +1,6 @@
 **[English](README.md)** | 中文
 
-# 🚄 KTMB 自动抢票机器人 v1.3.3
+# 🚄 KTMB 自动抢票机器人 v1.3.4
 
 马来西亚 KTMB 火车票自动抢票系统，支持 **Windows** 和 **Linux** 双平台运行。
 
@@ -25,6 +25,38 @@
 | 📝 **专业日志** | 结构化日志系统，同时输出到文件和控制台 |
 | 🔄 **通知重试** | Telegram 通知自动重试，指数退避策略 |
 | 🎮 **网页远程控制** | `/remote` 实时画面 + 鼠标点击 / 键盘输入 / CSS 选择器点击，Telegram 不可用也能接管 |
+
+---
+
+## 🆕 v1.3.4：Telegram 连不上？一键搞定
+
+有些网络（ISP / 公司 / 校园网）会把 `api.telegram.org` 的 IP 直接黑洞掉：**DNS 正常、TCP 443 超时**。
+抢票本身没问题，只是收不到通知和指令。v1.3.4 把整套应对方案做进去了：
+
+| 位置 | 干什么 |
+|------|--------|
+| 启动脚本 | 启动时**自动探测** Telegram 连通性（**不需要 token**）；连不上才弹菜单问你：① 装 Cloudflare WARP 只给 TG 用 ② 我自己有代理 ③ 跳过 |
+| 网页面板 → 通知 | 「启用 Telegram 代理」开关 + 代理地址框 + **测试代理**（真的请求一次）+ **一键开 WARP 代理** |
+| 抢票流程 | 只把代理注入机器人进程的 TG 请求；**KTMB 网站、浏览器、抢票速度完全不受影响** |
+| 依赖 | 新增 `PySocks`（SOCKS5 必需，纯 Python、50KB）；没装会自动降级直连并在日志里说清楚 |
+
+> **默认全关**：不用这个功能的用户，行为跟以前一模一样。
+
+### 为什么用 WARP 的「代理模式」
+
+WARP 客户端有三种模式：`warp`（全局接管）、`doh`（只换 DNS）、**`proxy`（只开一个本地 SOCKS5：`127.0.0.1:40000`）**。
+我们只用 `proxy` —— 因为它**不会**把 KTMB 的流量也绕去 Cloudflare，抢票延迟不变。
+
+### 常见代理该怎么填
+
+| 你的代理 | 地址写法 |
+|----------|----------|
+| Cloudflare WARP（代理模式） | `socks5h://127.0.0.1:40000` |
+| Clash / Clash Verge（混合端口） | `http://127.0.0.1:7890` |
+| v2rayN | `http://127.0.0.1:10809` |
+| 自己的 VPS（tinyproxy / 3proxy） | `http://你的IP:3128` |
+
+> `socks5h://` 的 **h** = 域名交给代理去解析（推荐）；写 `http://` 也可以。
 
 ---
 
@@ -77,6 +109,39 @@
 
 ---
 
+## 🌐 Telegram 连不上（被 ISP 黑洞）怎么办
+
+**第 0 步：先确认**（不用 token，cmd 里跑）：
+
+```
+curl -4 -v --max-time 10 https://api.telegram.org/
+```
+
+- 超时 → 你这条线路把 Telegram 的 IP 黑洞了，必须走代理
+- 能连上 → 这一段可以跳过
+
+**三种解决方式（任选一种）**
+
+1. **启动脚本一键（推荐）**：双击 `start_bot.bat`，检测到连不上会弹菜单，选 `1` 就会自动：下载官方 WARP 安装包 → 静默安装 → 开代理模式（SOCKS5）→ 测一次 → 写进 `config.json`。需要点一次 UAC。
+   - 不想看到这个询问：`set KTMB_NO_PROXY_PROMPT=1`
+2. **面板里手动**：`通知` 页 → 填代理地址 → 点「测试代理」→ 看到 ✅ 就「保存所有配置」→ 启动抢票。
+3. **命令行工具**（`venv\Scripts\python.exe`）：
+
+```
+python proxy_setup.py probe        # DNS / IPv4 / IPv6 三项探测（不需要 token）
+python proxy_setup.py status       # 代理配置 + WARP 状态 + 代理能不能用(JSON)
+python proxy_setup.py test         # 用配置里的代理真的请求一次 Telegram
+python proxy_setup.py enable-warp  # 装/开 WARP 代理模式并写配置
+python proxy_setup.py disable      # 关掉代理配置
+```
+
+**关掉它**：面板「通知」页取消勾选「启用 Telegram 代理」并保存，或执行 `proxy_setup.py disable`。
+关掉以后**连环境变量 `KTMB_TG_PROXY` 都不会生效**，方便排查到底是不是代理的问题。
+
+**Linux**：`start_linux.sh` 里也会跑同一套探测/菜单；WARP 在 Linux 上同样支持 `warp-cli mode proxy`。
+
+---
+
 ## 🚀 快速开始（3步搞定）
 
 ### 1. 安装 Python
@@ -125,6 +190,7 @@
 | `KTMB_CHROME_PORT` | 配置文件 `chrome_port` | Chrome 调试端口（可用 chrome://inspect 接管） |
 | `KTMB_TG_PROXY` | (跟随系统代理) | 访问 Telegram 的代理。例 `http://127.0.0.1:7890`；填 `off` = 强制直连（忽略系统代理） |
 | `KTMB_TG_IPV4` | `0` | 设 `1` = 一开始就只走 IPv4（IPv6 半残的网络用） |
+| `KTMB_NO_PROXY_PROMPT` | (未设置) | 设 `1` = 启动脚本不再询问要不要配 Telegram 代理 |
 
 ---
 
@@ -162,7 +228,8 @@
 | `telegram_token` | BotFather 给的 Token |
 | `telegram_chat_id` | 你的 chat id（先给机器人发一条消息） |
 | `heartbeat_screenshot` | 心跳是否附带截图（true/false） |
-| `telegram_proxy` | 可选。访问 Telegram 的代理，如 `http://127.0.0.1:7890`；`off` = 强制直连 |
+| `telegram_proxy` | 可选。Telegram 代理，如 `socks5h://127.0.0.1:40000`。可用 `proxy_setup.py` 或面板一键配置 |
+| `telegram_proxy_enabled` | 面板「启用 Telegram 代理」开关；`false` 时连环境变量 `KTMB_TG_PROXY` 都忽略 |
 
 ---
 
@@ -270,6 +337,7 @@ KTMB 同一账号**不允许同时登录**。如果程序被强制杀死（SIGKI
 | 提示「该车次没有可选座位」 | 该车次确实无票，等待下一轮刷新 |
 | 提示「未能到达付款页面」 | 支付流程元素变化，日志里会有截图，可据此更新选择器 |
 | 日志文件过大 | 超过 5MB 会自动轮转为 `bot.log.1` |
+| **Telegram 完全连不上（TCP 超时）** | 说明 IP 被黑洞了（不是 DNS 问题）。跑 `python proxy_setup.py probe` 看结论；一键：面板「通知」→「一键开 WARP 代理」，或双击启动脚本按提示选 1 |
 | **Windows：`Executable doesn't exist at ...\browsers\chromium_headless_shell-XXXX\...`** | **v1.3.1 已修复**。旧 `start_bot.bat` 是在 `playwright install` **之后**才设置 `PLAYWRIGHT_BROWSERS_PATH`，所以 Chromium 被下载进了默认缓存（`%LOCALAPPDATA%\ms-playwright`），而机器人却在 `.\browsers` 里找 → 就是这个报错。现在变量在安装之前就设好，并且每次启动都会安装 + 校验浏览器。仍然报错的话：删掉 `browsers\` 文件夹再双击一次。 |
 | `无法连接现有 Chrome: ECONNREFUSED ::1:9222` | 正常现象：机器人会自己启动 Chromium，这行只是提示"没有现成的 Chrome 可以接管"，不影响运行。 |
 | **TG 连不上时抢票会不会变慢** | 不会。v1.3.3 起通知和指令都在后台线程收发：抢票流程一秒都不等 Telegram，消息排队一直重试到发出去为止（最多保留 10 分钟）。 |

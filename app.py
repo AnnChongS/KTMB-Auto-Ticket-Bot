@@ -29,6 +29,7 @@ import logging
 import remote_control
 from remote_control import (SCREENSHOT_PATH, send_command, request_screenshot,
                             read_result, screenshot_state, mark_viewer)
+import proxy_setup
 
 # ================= 📝 日志系统 =================
 logging.basicConfig(
@@ -267,6 +268,20 @@ def ensure_playwright_browser(env):
         return True
 
 
+def _local_proxy_hostport(url):
+    """只对本机代理做端口预检（远程代理没法简单判断）"""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url if "://" in url else "http://" + url)
+        host = (p.hostname or "").lower()
+        if host in ("127.0.0.1", "localhost", "::1"):
+            default_port = 1080 if p.scheme.startswith("socks") else 7890
+            return host, int(p.port or default_port)
+    except Exception:
+        pass
+    return None, None
+
+
 def load_config():
     """加载配置文件，支持 UTF-8 BOM"""
     if not os.path.exists(CONFIG_FILE):
@@ -377,6 +392,27 @@ def api_start():
         # 强制设置子进程的环境变量为 utf-8，双重保险
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
+        # Telegram 代理：面板里开启时才注入，只影响机器人进程；KTMB 依旧直连
+        proxy_warning = ""
+        try:
+            proxy_on, proxy_url = proxy_setup.get_proxy_setting()
+        except Exception as e:
+            proxy_on, proxy_url = False, ""
+            logger.warning(f"读取代理配置失败: {e}")
+        if proxy_on and proxy_url:
+            env["KTMB_TG_PROXY"] = proxy_url
+            host, port = _local_proxy_hostport(proxy_url)
+            if host and port and not proxy_setup.port_listening(host, port):
+                logger.info(f"代理端口 {host}:{port} 还没监听，尝试拉起 WARP 代理模式 ...")
+                ok, msg = proxy_setup.enable_warp_proxy(port, auto_install=False, wait_seconds=15)
+                if ok:
+                    logger.info(msg)
+                else:
+                    proxy_warning = "Telegram 代理没起来：" + msg
+                    logger.warning(proxy_warning)
+            logger.info(f"机器人将使用 Telegram 代理: {proxy_url}")
+        else:
+            env.pop("KTMB_TG_PROXY", None)
         # 默认优先使用项目内的 browsers 目录，避免依赖全局 Playwright 缓存
         local_browsers = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browsers")
         if "PLAYWRIGHT_BROWSERS_PATH" not in env:
@@ -404,7 +440,7 @@ def api_start():
         bot_started_at = time.time()
         _write_bot_pid(bot_process.pid)
         logger.info(f"机器人已启动 (PID {bot_process.pid})")
-        return jsonify({"status": "success", "message": "机器人已启动！"})
+        return jsonify({"status": "success", "message": "机器人已启动！", "warning": proxy_warning})
     except FileNotFoundError:
         logger.error("找不到 Python 解释器或 ktmb_auto.py")
         return jsonify({"status": "error", "message": "找不到 Python 或脚本文件"}), 500
@@ -667,6 +703,81 @@ def api_remote_action(action):
         "status": "error",
         "message": "机器人没有响应：可能没在运行，或正忙着某个页面（可以去主页看日志）",
     }), 504
+
+
+@app.route('/api/proxy/status')
+def api_proxy_status():
+    """Telegram 代理状态（不联网，很快）"""
+    if not is_authenticated():
+        return jsonify({"status": "error", "message": "未认证"}), 401
+    enabled, url = proxy_setup.get_proxy_setting()
+    warp = proxy_setup.warp_status()
+    host, port = _local_proxy_hostport(url) if url else (None, None)
+    return jsonify({"status": "success",
+                    "proxy_enabled": enabled, "proxy_url": url,
+                    "proxy_listening": bool(host and port and proxy_setup.port_listening(host, port)),
+                    "warp_installed": warp["installed"], "warp_cli": warp["cli"],
+                    "warp_port_listening": warp["proxy_listening"],
+                    "platform": sys.platform})
+
+
+@app.route('/api/proxy/probe')
+def api_proxy_probe():
+    """不依赖 token 的连通性探测（DNS / IPv4 / IPv6）"""
+    if not is_authenticated():
+        return jsonify({"status": "error", "message": "未认证"}), 401
+    st = proxy_setup.probe_telegram(timeout=4)
+    st["telegram_reachable"] = st.get("reachable", False)
+    st["status"] = "success"
+    st["explain"] = proxy_setup.explain_probe(st)
+    return jsonify(st)
+
+
+@app.route('/api/proxy/test', methods=['POST'])
+def api_proxy_test():
+    """真的用这个代理请求一次 Telegram（有 token 就做 getMe）"""
+    if not is_authenticated():
+        return jsonify({"status": "error", "message": "未认证"}), 401
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        url = proxy_setup.get_proxy_setting()[1]
+    cfg = load_config()
+    token = ((cfg.get("notification", {}) or {}).get("telegram_token") or "").strip()
+    if url:
+        ok, msg = proxy_setup.test_proxy(url, token=token or None)
+    else:
+        ok, msg = proxy_setup._test_no_proxy(token=token or None)
+    return jsonify({"status": "success" if ok else "error", "message": msg, "ok": ok, "via": url or "直连"})
+
+
+@app.route('/api/proxy/enable-warp', methods=['POST'])
+def api_proxy_enable_warp():
+    """一键：装/开 Cloudflare WARP 代理模式，并把地址写进配置"""
+    if not is_authenticated():
+        return jsonify({"status": "error", "message": "未认证"}), 401
+    data = request.get_json(silent=True) or {}
+    port = int(data.get("port") or proxy_setup.DEFAULT_WARP_PORT)
+    ok, msg = proxy_setup.enable_warp_proxy(port, auto_install=True)
+    if not ok:
+        return jsonify({"status": "error", "message": msg}), 500
+    url = "socks5h://127.0.0.1:%d" % port
+    cfg = load_config()
+    token = ((cfg.get("notification", {}) or {}).get("telegram_token") or "").strip()
+    test_ok, test_msg = proxy_setup.test_proxy(url, token=token or None)
+    proxy_setup.set_proxy_setting(url, True)
+    logger.info(f"WARP 代理已配置: {url} ({test_msg})")
+    return jsonify({"status": "success", "message": msg, "url": url,
+                    "test_ok": test_ok, "test_message": test_msg})
+
+
+@app.route('/api/proxy/disable', methods=['POST'])
+def api_proxy_disable():
+    if not is_authenticated():
+        return jsonify({"status": "error", "message": "未认证"}), 401
+    proxy_setup.set_proxy_setting("", False)
+    logger.info("Telegram 代理已关闭")
+    return jsonify({"status": "success", "message": "Telegram 代理已关闭"})
 
 
 # ================= 🚀 启动入口 =================

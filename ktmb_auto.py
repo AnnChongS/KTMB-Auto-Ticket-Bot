@@ -203,8 +203,13 @@ _TG_WORKERS = {"started": False, "stop": False, "lock": threading.Lock(), "event
 
 # Telegram 网络参数（可写在 config.json 的 notification 里，也可用环境变量覆盖）
 #   telegram_proxy : "http://127.0.0.1:7890" 指定代理；填 "off" / "direct" 表示强制直连（忽略系统代理）
-TG_PROXY = (os.environ.get("KTMB_TG_PROXY")
-            or (CFG.get("notification", {}) or {}).get("telegram_proxy", "") or "").strip()
+_NOTIF_CFG = CFG.get("notification", {}) or {}
+# 面板里的开关优先：关掉以后连环境变量都不看，避免"面板关了还在走代理"
+_PROXY_ENABLED = _NOTIF_CFG.get("telegram_proxy_enabled", True)
+if _PROXY_ENABLED:
+    TG_PROXY = (os.environ.get("KTMB_TG_PROXY") or _NOTIF_CFG.get("telegram_proxy", "") or "").strip()
+else:
+    TG_PROXY = ""
 TG_FORCE_IPV4 = str(os.environ.get("KTMB_TG_IPV4", "0")).strip().lower() in ("1", "true", "yes", "on")
 
 _tg_local = threading.local()
@@ -231,6 +236,15 @@ def _force_tg_ipv4():
         logger.debug(f"[TG] 切换 IPv4 失败: {e}")
 
 
+def _socks_available():
+    # SOCKS 代理需要 PySocks（很小，requirements.txt 里已经带上）
+    try:
+        import socks
+        return bool(socks)
+    except Exception:
+        return False
+
+
 def _tg_session():
     """每个线程一个连接池：复用 TCP/TLS 连接，弱网下比每次新建连接稳得多"""
     sess = getattr(_tg_local, "session", None)
@@ -241,13 +255,19 @@ def _tg_session():
     sess.mount("https://", adapter)
     sess.mount("http://", adapter)
     proxy = TG_PROXY.lower()
+    use_proxy = TG_PROXY
+    if proxy.startswith(("socks5", "socks4")) and not _socks_available():
+        logger.error("[TG] 代理是 SOCKS 协议，但缺少 PySocks 依赖 -> 本次不使用代理")
+        logger.error("[TG] 修复：用项目 venv 里的 python 执行 -m pip install PySocks")
+        use_proxy = ""
     if proxy in ("off", "none", "direct", "no-proxy", "-"):
         sess.trust_env = False
         sess.proxies = {}
-    elif TG_PROXY:
+    elif use_proxy:
         sess.trust_env = False
-        sess.proxies = {"http": TG_PROXY, "https": TG_PROXY}
-    logger.info(f"[TG] 已建立连接池会话 (代理: {TG_PROXY or '跟随系统'})")
+        sess.proxies = {"http": use_proxy, "https": use_proxy}
+    proxy_txt = use_proxy if use_proxy else "跟随系统"
+    logger.info(f"[TG] 已建立连接池会话 (代理: {proxy_txt})")
     _tg_local.session = sess
     return sess
 

@@ -145,6 +145,8 @@ start_panel() {
   ensure_system_libs
   ensure_browser
 
+  info "检测 Telegram 连通性（连不上时会询问是否配置代理）..."
+  "$PY" proxy_setup.py offer || warn "代理助手执行失败，忽略继续"
   info "启动 Web 管理面板: http://$WEB_HOST:$WEB_PORT"
   info "远程控制页面: http://$WEB_HOST:$WEB_PORT/remote"
   KTMB_WEB_PORT="$WEB_PORT" KTMB_WEB_HOST="$WEB_HOST" \

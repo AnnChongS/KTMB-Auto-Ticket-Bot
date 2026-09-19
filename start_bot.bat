@@ -6,6 +6,13 @@ rem  2. A Chrome window will open by itself (that is the bot's browser - keep it
 rem  3. Open http://127.0.0.1:5000 in your browser
 rem  4. Press Ctrl+C in this window to stop (the bot logs out first)
 rem
+rem  v1.3.4 fixes
+rem  ----------------------------------------------------------
+rem  [H] If api.telegram.org is blocked on your network, step [5/7]
+rem      offers to install Cloudflare WARP and use it ONLY for Telegram
+rem      (SOCKS5 proxy mode). Ticket grabbing stays direct.
+rem      Skip the prompt with:  set KTMB_NO_PROXY_PROMPT=1
+rem
 rem  v1.3.3 fixes
 rem  ----------------------------------------------------------
 rem  [F] Telegram runs on background threads now: a slow or dead
@@ -82,7 +89,11 @@ echo       verifying the browser really exists...
 "%VENV_PY%" -c "import os,sys;from playwright.sync_api import sync_playwright as s;pw=s().start();e=pw.chromium.executable_path;pw.stop();print('      browser: '+e);sys.exit(0 if os.path.exists(e) else 3)"
 if errorlevel 1 goto browser_verify_fail
 
-echo [5/6] Checking port %KTMB_WEB_PORT%...
+echo [5/7] Checking Telegram connectivity...
+echo       (blocked network? it will offer to set up a proxy just for Telegram)
+"%VENV_PY%" proxy_setup.py offer
+
+echo [6/7] Checking port %KTMB_WEB_PORT%...
 netstat -ano | findstr /r /c:":%KTMB_WEB_PORT% .*LISTENING" >nul 2>&1
 if not errorlevel 1 (
     echo [WARN] port %KTMB_WEB_PORT% is already in use.
@@ -90,7 +101,7 @@ if not errorlevel 1 (
     echo.
 )
 
-echo [6/6] Starting web panel - keep this window open...
+echo [7/7] Starting web panel - keep this window open...
 echo.
 echo   Panel   : http://127.0.0.1:%KTMB_WEB_PORT%
 echo   Remote  : http://127.0.0.1:%KTMB_WEB_PORT%/remote   (live screen + click/keyboard)

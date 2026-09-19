@@ -1,6 +1,6 @@
 English | **[中文](README_zh.md)**
 
-# 🚄 KTMB Auto Ticket Bot v1.3.3
+# 🚄 KTMB Auto Ticket Bot v1.3.4
 
 An automated ticket booking system for Malaysia's KTMB train service, supporting both **Windows** and **Linux** platforms.
 
@@ -26,6 +26,38 @@ Powered by Playwright browser automation to simulate real user operations — fu
 | 🔄 **Notification Retry** | Telegram notifications with automatic retry and exponential backoff |
 | 🎮 **Web Remote Control** | `/remote` live screen with mouse click / keyboard / CSS selector control - works even when Telegram is blocked |
 
+
+---
+
+## 🆕 v1.3.4: Telegram blocked? One-click fix
+
+Some networks (ISPs, offices, campus) blackhole `api.telegram.org`: **DNS resolves fine, TCP 443 times out**.
+Ticket grabbing still works - you just get no notifications or commands. v1.3.4 ships the full workaround:
+
+| Where | What it does |
+|-------|--------------|
+| Launcher | **Probes** Telegram connectivity at startup (**no token needed**) and, only when it fails, asks: (1) install Cloudflare WARP for Telegram only (2) I already have a proxy (3) skip |
+| Web panel -> Alerts | "Enable Telegram proxy" switch + proxy URL + **Test proxy** (a real request) + **Enable WARP proxy mode** |
+| Ticket flow | The proxy is injected into the bot process for Telegram requests only; **KTMB, the browser and grabbing speed are untouched** |
+| Dependencies | New `PySocks` (required for SOCKS5, pure Python, 50KB). If missing, the bot logs it and falls back to direct |
+
+> **Off by default**: for everyone who does not need it, behaviour is unchanged.
+
+### Why WARP "proxy mode"
+
+WARP has three modes: `warp` (whole-system tunnel), `doh` (DNS only) and **`proxy` (a local SOCKS5 on `127.0.0.1:40000`)**.
+We only use `proxy`, because it does **not** route KTMB traffic through Cloudflare - grabbing latency is unchanged.
+
+### Typical proxy values
+
+| Your proxy | Value |
+|------------|-------|
+| Cloudflare WARP (proxy mode) | `socks5h://127.0.0.1:40000` |
+| Clash / Clash Verge (mixed port) | `http://127.0.0.1:7890` |
+| v2rayN | `http://127.0.0.1:10809` |
+| Your own VPS (tinyproxy / 3proxy) | `http://YOUR_IP:3128` |
+
+> The `h` in `socks5h://` means the proxy resolves the hostname (recommended). Plain `http://` works too.
 
 ---
 
@@ -73,6 +105,39 @@ Click **Remote** in the top-right corner of the panel, or open `http://127.0.0.1
 - The status box shows how old the frame is, whether the bot is running, and the current phase
 
 > Handy when Telegram is blocked, or when you want to take over the payment manually.
+
+---
+
+## 🌐 Telegram unreachable (blackholed by your ISP)
+
+**Step 0 - confirm** (no token needed, run in cmd):
+
+```
+curl -4 -v --max-time 10 https://api.telegram.org/
+```
+
+- Timeout -> your line blackholes Telegram; a proxy is required
+- Works -> skip this whole section
+
+**Three ways to fix it (pick one)**
+
+1. **Launcher (recommended)**: double-click `start_bot.bat`; when it detects the failure it offers a menu. Choosing `1` downloads the official WARP installer, installs it silently, enables proxy mode (SOCKS5), tests it and writes it into `config.json`. One UAC prompt.
+   - Hide this prompt: `set KTMB_NO_PROXY_PROMPT=1`
+2. **In the panel**: Alerts tab -> fill the proxy URL -> Test proxy -> when you see OK, Save -> Start.
+3. **Command line** (`venv\Scripts\python.exe`):
+
+```
+python proxy_setup.py probe        # DNS / IPv4 / IPv6 probe (no token)
+python proxy_setup.py status       # config + WARP state + proxy test (JSON)
+python proxy_setup.py test         # request Telegram through the configured proxy
+python proxy_setup.py enable-warp  # install/enable WARP proxy mode + save config
+python proxy_setup.py disable      # turn the proxy setting off
+```
+
+**Turning it off**: uncheck "Enable Telegram proxy" in the panel (or run `proxy_setup.py disable`).
+Once off, even the `KTMB_TG_PROXY` environment variable is ignored - handy when debugging.
+
+**Linux**: `start_linux.sh` runs the same probe/menu; WARP supports `warp-cli mode proxy` there too.
 
 ---
 
@@ -124,6 +189,7 @@ Click **Save** → **Start**, then wait for tickets 🎉
 | `KTMB_CHROME_PORT` | `chrome_port` from config | Chrome debug port (take over via chrome://inspect) |
 | `KTMB_TG_PROXY` | (follow system proxy) | Proxy for Telegram, e.g. `http://127.0.0.1:7890`; `off` = force direct connection |
 | `KTMB_TG_IPV4` | `0` | `1` = use IPv4 only from the start (for half-broken IPv6 networks) |
+| `KTMB_NO_PROXY_PROMPT` | (unset) | `1` = the launcher stops asking about a Telegram proxy |
 
 ---
 
@@ -161,7 +227,8 @@ Click **Save** → **Start**, then wait for tickets 🎉
 | `telegram_token` | Token from BotFather |
 | `telegram_chat_id` | Your chat id (send the bot a message first) |
 | `heartbeat_screenshot` | Attach a screenshot to the heartbeat (true/false) |
-| `telegram_proxy` | Optional. Proxy for Telegram, e.g. `http://127.0.0.1:7890`; `off` = force direct |
+| `telegram_proxy` | Optional. Proxy for Telegram, e.g. `socks5h://127.0.0.1:40000` (panel/`proxy_setup.py` can set it up) |
+| `telegram_proxy_enabled` | Panel switch; when `false` even the `KTMB_TG_PROXY` env var is ignored |
 
 ---
 
@@ -271,6 +338,7 @@ This version protects against that in several ways:
 | "no selectable seat" | The train is really full; the bot keeps refreshing |
 | "could not reach the payment page" | Payment DOM changed; check the log screenshot and update selectors |
 | Log file too large | Rotated automatically to `bot.log.1` above 5MB |
+| **Telegram completely unreachable (TCP timeout)** | Your line blackholes the IP (not a DNS issue). Run `python proxy_setup.py probe`; fix it in the panel (Alerts -> Enable WARP proxy) or by answering the launcher prompt |
 | **Windows: `Executable doesn't exist at ...\browsers\chromium_headless_shell-XXXX\...`** | **Fixed in v1.3.1.** The old `start_bot.bat` set `PLAYWRIGHT_BROWSERS_PATH` *after* `playwright install`, so Chromium was downloaded into the default cache (`%LOCALAPPDATA%\ms-playwright`) while the bot looked inside `.\browsers` - exactly this error. The variable is now set before installing, and the browser is installed + verified on every launch. If it still fails, delete the `browsers\` folder and run the launcher again. |
 | `cannot connect to existing Chrome: ECONNREFUSED ::1:9222` | Harmless: the bot starts its own Chromium. It only means "no external Chrome to attach to". |
 | **Does a dead Telegram slow the ticket flow?** | No. Since v1.3.3 notifications and commands use background threads: the ticket flow never waits for Telegram, and queued messages keep retrying until delivered (kept up to 10 minutes). |
