@@ -31,7 +31,7 @@ import signal
 import threading
 from datetime import datetime
 from playwright.sync_api import Playwright, sync_playwright
-from remote_control import save_screenshot, get_command, execute_remote_command
+from remote_control import save_screenshot, get_command, peek_command, execute_remote_command
 
 # ================= 📝 日志系统初始化 =================
 def setup_logging():
@@ -747,6 +747,8 @@ def login(page, max_attempts=3):
                     return True
                 time.sleep(1)
                 continue
+            if check_remote_stop_command():
+                return False
             logger.info(f"[系统] 执行登录... (第 {attempt}/{max_attempts} 次)")
             email_box.first.fill(KTMB_EMAIL)
             page.get_by_role("textbox", name="Password").first.fill(KTMB_PASSWORD)
@@ -756,7 +758,8 @@ def login(page, max_attempts=3):
                 return False
             logger.warning(f"[登录] 提交表单异常，重试中: {e}")
             handle_popup(page)
-            time.sleep(2)
+            if not interruptible_sleep(2):
+                return False
             continue
 
         # 等待跳转 / 错误弹窗
@@ -780,7 +783,8 @@ def login(page, max_attempts=3):
                 logger.info("[系统] 登录成功")
                 cache_cookies(page)
                 return True
-            time.sleep(1)
+            if not interruptible_sleep(1):
+                return False
 
         if is_logged_in(page) and "Login" not in page.url:
             logger.info("[系统] 登录成功")
@@ -788,8 +792,10 @@ def login(page, max_attempts=3):
             return True
 
         if attempt < max_attempts:
-            logger.warning(f"[登录] 第 {attempt} 次尝试未成功，{3 * attempt} 秒后重试")
-            time.sleep(3 * attempt)
+            wait_s = 2 * attempt
+            logger.warning(f"[登录] 第 {attempt} 次尝试未成功，{wait_s} 秒后重试")
+            if not interruptible_sleep(wait_s):
+                return False
 
     logger.error(f"[系统] 登录失败（已重试 {max_attempts} 次）")
     send_notification("❌ 登录失败，请检查账号密码或 KTMB 网站状态。")
@@ -1497,24 +1503,60 @@ def execute_payment_command(page, context, command, target_id):
     return False
 
 
+def check_remote_stop_command():
+    """检查命令文件里是否有停止指令
+
+    这一步很关键：Windows 上面板无法用 SIGTERM 优雅停止进程（terminate 是硬杀），
+    只能靠命令文件。如果在长时间等待中不检查，面板 45 秒超时后会硬杀，
+    机器人来不及登出 KTMB -> 30 分钟冷却。
+    """
+    global SHOULD_LOGOUT_AND_EXIT
+    if SHOULD_LOGOUT_AND_EXIT:
+        return True
+    try:
+        cmd = peek_command()
+    except Exception:
+        return False
+    if not cmd:
+        return False
+    if cmd.get('action') in ('logout', 'stop', 'shutdown'):
+        SHOULD_LOGOUT_AND_EXIT = True
+        logger.info("[远程控制] 收到停止指令，准备安全登出")
+        return True
+    return False
+
+
 def interruptible_sleep(seconds):
-    """可被退出信号打断的等待"""
+    """可被打断的等待：响应退出信号，也响应 Web 面板的停止指令"""
     for _ in range(int(seconds)):
         if SHOULD_LOGOUT_AND_EXIT:
+            return False
+        if check_remote_stop_command():
             return False
         time.sleep(1)
     return not SHOULD_LOGOUT_AND_EXIT
 
 
 def handle_remote_control(page):
-    """处理一次远程控制命令"""
+    """处理一次远程控制命令
+
+    注意：Web 面板"停止"时在 Windows 上无法用 SIGTERM 优雅退出（terminate 是硬杀），
+    所以面板会写一个 logout 命令文件，由这里接管并触发安全登出。
+    """
+    global SHOULD_LOGOUT_AND_EXIT
     try:
         save_screenshot(page)
         remote_cmd = get_command()
-        if remote_cmd:
-            logger.info(f"[远程控制] 收到命令: {remote_cmd['action']}")
-            result = execute_remote_command(page, remote_cmd)
-            logger.info(f"[远程控制] 执行结果: {result}")
+        if not remote_cmd:
+            return
+        action = remote_cmd.get('action')
+        if action in ('logout', 'stop', 'shutdown'):
+            SHOULD_LOGOUT_AND_EXIT = True
+            logger.info("[远程控制] 收到停止指令，准备安全登出")
+            return
+        logger.info(f"[远程控制] 收到命令: {action}")
+        result = execute_remote_command(page, remote_cmd)
+        logger.info(f"[远程控制] 执行结果: {result}")
     except Exception as e:
         logger.warning(f"[远程控制] 处理失败: {e}")
 
@@ -1787,6 +1829,21 @@ def run(playwright: Playwright) -> None:
         logger.warning(f"[连接] 无法连接现有 Chrome: {e}")
         logger.info("[连接] 正在自动启动 Chromium 浏览器...")
 
+        # 预检：真的启动一次浏览器，失败就给可操作提示（而不是甩 Playwright 堆栈）
+        try:
+            _probe = playwright.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            _probe.close()
+        except Exception as probe_err:
+            detail = str(probe_err).strip().splitlines()[0][:200]
+            browsers_path = os.environ.get('PLAYWRIGHT_BROWSERS_PATH') or '(默认缓存)'
+            hint = (f"浏览器无法启动: {detail}\n"
+                    f"下载目录: {browsers_path}\n"
+                    "请在项目目录执行:\n"
+                    "venv\\Scripts\\python.exe -m playwright install chromium")
+            logger.error("[连接] " + hint.replace(chr(10), " | "))
+            send_notification("❌ <b>浏览器无法启动</b>\n" + hint)
+            return
+
         # 方式2: 自动启动新的 Chromium 实例
         try:
             browser = playwright.chromium.launch(
@@ -1877,16 +1934,10 @@ def run(playwright: Playwright) -> None:
             if SHOULD_LOGOUT_AND_EXIT:
                 break
 
-            # 远程控制: 保存截图 & 处理命令
-            try:
-                save_screenshot(page)
-                remote_cmd = get_command()
-                if remote_cmd:
-                    logger.info(f"[远程控制] 收到命令: {remote_cmd['action']}")
-                    result = execute_remote_command(page, remote_cmd)
-                    logger.info(f"[远程控制] 执行结果: {result}")
-            except Exception as e:
-                logger.warning(f"[远程控制] 处理失败: {e}")
+            # 远程控制: 截图 + 处理命令（含面板停止指令）
+            handle_remote_control(page)
+            if SHOULD_LOGOUT_AND_EXIT:
+                break
 
             total_loop += 1
             BOT_STATE["round"] = total_loop
@@ -1977,16 +2028,10 @@ def run(playwright: Playwright) -> None:
                 if SHOULD_LOGOUT_AND_EXIT:
                     break
 
-                # 远程控制: 每秒都检查
-                try:
-                    save_screenshot(page)
-                    remote_cmd = get_command()
-                    if remote_cmd:
-                        logger.info(f"[远程控制] 收到命令: {remote_cmd['action']}")
-                        result = execute_remote_command(page, remote_cmd)
-                        logger.info(f"[远程控制] 执行结果: {result}")
-                except Exception as e:
-                    logger.warning(f"[远程控制] 处理失败: {e}")
+                # 远程控制: 每秒都检查（含面板停止指令）
+                handle_remote_control(page)
+                if SHOULD_LOGOUT_AND_EXIT:
+                    break
 
                 if i % 10 == 0 or i <= 5:
                     sys.stdout.write(f"    剩余 {i} 秒...\r")

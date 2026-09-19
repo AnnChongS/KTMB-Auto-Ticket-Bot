@@ -47,6 +47,21 @@ def get_command():
     except Exception:
         return None
 
+def peek_command():
+    """不删除地读取命令文件
+
+    用于机器人在长时间等待（登录重试、搜索、付款待命）时也能马上发现"停止"指令。
+    普通命令不会被消费掉，仍然由 get_command() 正常取走执行。
+    """
+    if not os.path.exists(COMMAND_PATH):
+        return None
+    try:
+        with open(COMMAND_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 def execute_remote_command(page, cmd):
     """Bot调用: 执行远程命令"""
     action = cmd.get('action')

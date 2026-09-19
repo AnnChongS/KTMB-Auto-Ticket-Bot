@@ -197,6 +197,9 @@ KTMB 同一账号**不允许同时登录**。如果程序被强制杀死（SIGKI
 | 提示「该车次没有可选座位」 | 该车次确实无票，等待下一轮刷新 |
 | 提示「未能到达付款页面」 | 支付流程元素变化，日志里会有截图，可据此更新选择器 |
 | 日志文件过大 | 超过 5MB 会自动轮转为 `bot.log.1` |
+| **Windows：`Executable doesn't exist at ...\browsers\chromium_headless_shell-XXXX\...`** | **v1.3.1 已修复**。旧 `start_bot.bat` 是在 `playwright install` **之后**才设置 `PLAYWRIGHT_BROWSERS_PATH`，所以 Chromium 被下载进了默认缓存（`%LOCALAPPDATA%\ms-playwright`），而机器人却在 `.\browsers` 里找 → 就是这个报错。现在变量在安装之前就设好，并且每次启动都会安装 + 校验浏览器。仍然报错的话：删掉 `browsers\` 文件夹再双击一次。 |
+| `无法连接现有 Chrome: ECONNREFUSED ::1:9222` | 正常现象：机器人会自己启动 Chromium，这行只是提示"没有现成的 Chrome 可以接管"，不影响运行。 |
+| 点「停止」后等很久 | v1.3.1 起，机器人在登录重试 / 搜索 / 付款待命等长时间等待中也会每秒检查停止指令，通常 1-3 秒内安全登出退出（不会被硬杀，避免 30 分钟冷却）。 |
 
 ---
 

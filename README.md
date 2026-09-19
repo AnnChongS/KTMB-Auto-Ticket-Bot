@@ -199,6 +199,9 @@ This version protects against that in several ways:
 | "no selectable seat" | The train is really full; the bot keeps refreshing |
 | "could not reach the payment page" | Payment DOM changed; check the log screenshot and update selectors |
 | Log file too large | Rotated automatically to `bot.log.1` above 5MB |
+| **Windows: `Executable doesn't exist at ...\browsers\chromium_headless_shell-XXXX\...`** | **Fixed in v1.3.1.** The old `start_bot.bat` set `PLAYWRIGHT_BROWSERS_PATH` *after* `playwright install`, so Chromium was downloaded into the default cache (`%LOCALAPPDATA%\ms-playwright`) while the bot looked inside `.\browsers` - exactly this error. The variable is now set before installing, and the browser is installed + verified on every launch. If it still fails, delete the `browsers\` folder and run the launcher again. |
+| `cannot connect to existing Chrome: ECONNREFUSED ::1:9222` | Harmless: the bot starts its own Chromium. It only means "no external Chrome to attach to". |
+| Stopping the bot takes very long | Since v1.3.1 the bot polls for a stop request even during login retries / searches / payment standby, so it logs out and exits within 1-3s (no hard kill, no 30-minute cooldown). |
 
 ---
 

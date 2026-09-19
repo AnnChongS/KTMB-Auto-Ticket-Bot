@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import signal
 import secrets
 import logging
@@ -56,6 +57,41 @@ bot_log_file_handle = None  # 保存日志文件句柄引用
 
 if not os.path.exists(LOG_FILE):
     open(LOG_FILE, 'w', encoding='utf-8').close()
+
+
+_BROWSER_PROBE = ("import os,sys;"
+                  "from playwright.sync_api import sync_playwright as s;"
+                  "pw=s().start();e=pw.chromium.executable_path;pw.stop();"
+                  "print(e);sys.exit(0 if os.path.exists(e) else 3)")
+
+
+def ensure_playwright_browser(env):
+    """确保机器人要用的 Chromium 真的在 PLAYWRIGHT_BROWSERS_PATH 里，缺了自动下载
+
+    专门防止 "Executable doesn't exist at ...\browsers\chromium_headless_shell-XXXX"：
+    只要下载目录和运行目录不一致（或版本不对），这里会自动补齐。
+    """
+    target = env.get('PLAYWRIGHT_BROWSERS_PATH') or '(默认缓存)'
+    try:
+        probe = subprocess.run([sys.executable, '-c', _BROWSER_PROBE], env=env,
+                               capture_output=True, text=True, timeout=90)
+        if probe.returncode == 0:
+            logger.info(f"浏览器就绪: {probe.stdout.strip()}")
+            return True
+        logger.warning(f"浏览器缺失（{target}），正在自动下载 Chromium ...")
+        install = subprocess.run([sys.executable, '-m', 'playwright', 'install', 'chromium'],
+                                 env=env, capture_output=True, text=True, timeout=1800)
+        if install.returncode != 0:
+            logger.error(f"Chromium 下载失败: {(install.stderr or install.stdout or '')[-300:]}")
+            return False
+        probe = subprocess.run([sys.executable, '-c', _BROWSER_PROBE], env=env,
+                               capture_output=True, text=True, timeout=90)
+        ok = probe.returncode == 0
+        logger.info(("浏览器已就绪: " if ok else "浏览器仍然缺失: ") + (probe.stdout or '').strip())
+        return ok
+    except Exception as e:
+        logger.warning(f"浏览器自检跳过: {e}")
+        return True
 
 
 def load_config():
@@ -171,6 +207,12 @@ def api_start():
         if "PLAYWRIGHT_BROWSERS_PATH" not in env:
             env["PLAYWRIGHT_BROWSERS_PATH"] = local_browsers if os.path.isdir(local_browsers) else "0"
 
+        # 先确保 Chromium 真的在下载目录里（不在就自动下）——Windows 上最容易踩的坑
+        if not ensure_playwright_browser(env):
+            return jsonify({"status": "error",
+                            "message": "Chromium 缺失且自动下载失败。请在项目目录执行: "
+                                       "venv\\Scripts\\python.exe -m playwright install chromium"}), 500
+
         # 直接启动 bot（Chromium headless 模式不需要显示器）
         # 不用 xvfb-run 包裹，确保 SIGTERM 能正确传递到 Python 进程
         cmd = [sys.executable, "-u", "ktmb_auto.py"]
@@ -195,24 +237,42 @@ def api_start():
 
 
 def stop_bot(timeout=45):
-    """安全停止机器人：先 SIGTERM 让 bot 完成 KTMB 登出，超时才强杀"""
+    """安全停止机器人
+
+    Windows 上 Popen.terminate() 是硬杀（TerminateProcess），机器人没机会登出 KTMB，
+    会触发 30 分钟冷却。所以这里先用命令文件让 bot 自己安全登出退出，超时才强杀
+    （Linux 下另外补一个 SIGTERM，更快）。
+    """
     global bot_process, bot_log_file_handle
     if not (bot_process and bot_process.poll() is None):
         bot_process = None
         return False
 
-    logger.info("正在安全停止机器人（等待登出）...")
-    bot_process.terminate()
     try:
-        bot_process.wait(timeout=timeout)
-        logger.info("机器人进程已正常退出")
-    except subprocess.TimeoutExpired:
-        logger.warning("机器人进程未响应，已强制杀死")
-        bot_process.kill()
+        send_command('logout')
+        logger.info("已通知机器人安全登出 KTMB...")
+    except Exception as e:
+        logger.warning(f"发送登出指令失败: {e}")
+
+    if os.name != 'nt':
         try:
+            bot_process.terminate()   # Linux: SIGTERM，bot 会先安全登出
+        except Exception:
+            pass
+
+    deadline = time.time() + timeout
+    while time.time() < deadline and bot_process.poll() is None:
+        time.sleep(0.5)
+
+    if bot_process.poll() is None:
+        logger.warning("机器人未响应登出指令，强制结束")
+        try:
+            bot_process.kill()
             bot_process.wait(timeout=5)
         except Exception:
             pass
+    else:
+        logger.info("机器人已安全登出并退出")
 
     bot_process = None
     if bot_log_file_handle:
