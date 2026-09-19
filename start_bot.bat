@@ -11,11 +11,11 @@ title KTMB Ticket Commander
 cd /d "%~dp0"
 
 set "VENV_PY=%CD%\venv\Scripts\python.exe"
-set "PLAYWRIGHT_BROWSERS_PATH=%CD%\browsers"
+set "PW_PATH=%CD%\browsers"
 if "%KTMB_WEB_PORT%"=="" set "KTMB_WEB_PORT=5000"
 
 echo ===================================================
-echo   KTMB Ticket Commander - launcher
+echo   KTMB Ticket Commander
 echo ===================================================
 echo.
 
@@ -47,9 +47,10 @@ if errorlevel 1 (
 )
 
 echo [4/6] Checking Playwright browser...
-dir /b /ad "%PLAYWRIGHT_BROWSERS_PATH%\chromium-*" >nul 2>&1
-if errorlevel 1 (
-    echo       downloading Chromium (first run only)...
+set "NEED_BROWSER=1"
+for /d %%D in ("%PW_PATH%\chromium-*") do set "NEED_BROWSER=0"
+if "!NEED_BROWSER!"=="1" (
+    echo       downloading Chromium (first run only^)...
     "%VENV_PY%" -m playwright install chromium
     if errorlevel 1 (
         echo [ERROR] browser download failed
@@ -59,7 +60,7 @@ if errorlevel 1 (
 )
 
 echo [5/6] Checking port %KTMB_WEB_PORT%...
-netstat -ano | findstr /r /c:":%KTMB_WEB_PORT% .*LISTENING" >nul
+netstat -ano | findstr /r /c:":%KTMB_WEB_PORT% .*LISTENING" >nul 2>&1
 if not errorlevel 1 (
     echo [WARN] port %KTMB_WEB_PORT% is already in use.
     echo        Set another one first, e.g.  set KTMB_WEB_PORT=5001
@@ -69,9 +70,10 @@ if not errorlevel 1 (
 echo [6/6] Starting web panel - keep this window open...
 echo.
 echo   Panel : http://127.0.0.1:%KTMB_WEB_PORT%
-echo   Pass  : admin123   (change it with KTMB_WEB_PASSWORD)
+echo   First run: create the admin account in your browser
 echo.
 start "" cmd /c "timeout /t 3 >nul & start http://127.0.0.1:%KTMB_WEB_PORT%"
+set "PLAYWRIGHT_BROWSERS_PATH=%PW_PATH%"
 "%VENV_PY%" app.py
 
 echo.
