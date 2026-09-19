@@ -766,7 +766,8 @@ def api_proxy_test():
     else:
         ok, msg = proxy_setup._test_no_proxy(token=token or None)
         via = "直连"
-    return jsonify({"status": "success" if ok else "error", "message": msg, "ok": ok, "via": via})
+    return jsonify({"status": "success" if ok else "error", "message": msg, "ok": ok, "via": via,
+                    "resolved": proxy_setup.normalize_api_base(base) if base else ""})
 
 
 @app.route('/api/proxy/enable-warp', methods=['POST'])

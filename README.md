@@ -45,6 +45,12 @@ Ticket grabbing still works - you just get no notifications or commands. v1.3.4 
 
 ### Option: Cloudflare Worker reverse proxy (no software to install)
 
+> **Both styles work:**
+> - **Prefix style** (prepend the prefix to the full URL, e.g. `https://worker.yourdomain.com/https://api.telegram.org/bot<token>/getMe`):
+>   put **just `https://worker.yourdomain.com/`** in "Telegram API base" - `/https://api.telegram.org` is appended automatically.
+> - **Path style** (`/SECRET/bot<token>/method`): use `https://tg.yourdomain.com/SECRET` as-is.
+> - Rule of thumb: **domain only (no path) = prefix style; with a path = path style**.
+
 If you have a Cloudflare account and a domain, this is the **easiest** route (no WARP, no admin rights, works from any machine):
 
 1. Cloudflare -> Workers & Pages -> Create -> Worker, paste:
@@ -89,7 +95,8 @@ We only use `proxy`, because it does **not** route KTMB traffic through Cloudfla
 | Clash / Clash Verge (mixed port) | `http://127.0.0.1:7890` |
 | v2rayN | `http://127.0.0.1:10809` |
 | Your own VPS (tinyproxy / 3proxy) | `http://YOUR_IP:3128` |
-| **Your own reverse proxy (Cloudflare Worker)** | **not here** - use the "Telegram API base" field, e.g. `https://tg.yourdomain.com/SECRET` |
+| **Reverse proxy, prefix style (Cloudflare Worker)** | **not here** - put it in "Telegram API base", e.g. just `https://worker.yourdomain.com/` (auto-completed to `https://worker.yourdomain.com/https://api.telegram.org`) |
+| **Reverse proxy, path style (with a secret)** | Also in "Telegram API base": `https://tg.yourdomain.com/SECRET` |
 
 > The `h` in `socks5h://` means the proxy resolves the hostname (recommended). Plain `http://` works too.
 
@@ -266,7 +273,7 @@ Click **Save** → **Start**, then wait for tickets 🎉
 | `heartbeat_screenshot` | Attach a screenshot to the heartbeat (true/false) |
 | `telegram_proxy` | Optional. Proxy for Telegram, e.g. `socks5h://127.0.0.1:40000` (panel/`proxy_setup.py` can set it up) |
 | `telegram_proxy_enabled` | Panel switch; when `false` even the `KTMB_TG_PROXY` env var is ignored |
-| `telegram_api_base` | Custom API base (Cloudflare Worker etc.), e.g. `https://tg.yourdomain.com/SECRET`; empty = official `api.telegram.org` |
+| `telegram_api_base` | Custom API base. Prefix style: `https://worker.yourdomain.com/` (auto-completed); path style: `https://tg.yourdomain.com/SECRET`; empty = official `api.telegram.org` |
 
 ---
 

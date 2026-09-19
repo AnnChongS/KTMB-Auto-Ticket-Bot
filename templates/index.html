@@ -384,7 +384,8 @@ h1{font-family:var(--f-display);font-weight:700;font-size:30px;letter-spacing:.0
           </div>
           <div class="form-group" style="margin-top:10px">
             <label class="form-label" data-i18n="tg_api_base">Telegram API 地址（可选，自建反代用）</label>
-            <input type="text" class="form-input" id="tg_api_base" placeholder="https://tg.你的域名/密钥" value="{{ config.get('notification', {}).get('telegram_api_base', '') }}">
+            <div class="panel-hint" style="margin:-4px 0 6px" data-i18n="tg_api_base_hint">前缀式只填域名（自动补 /https://api.telegram.org）；路径式填完整地址，如 https://tg.域名/密钥</div>
+            <input type="text" class="form-input" id="tg_api_base" placeholder="https://worker.你的域名/  或  https://tg.你的域名/密钥" value="{{ config.get('notification', {}).get('telegram_api_base', '') }}">
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button type="button" class="ghost-btn" onclick="probeTelegram()" data-i18n="tg_probe">检测连通性</button>
@@ -486,6 +487,7 @@ var i18nDict = {
     tg_probing: '正在检测 Telegram 连通性...',
     tg_testing: '正在通过代理请求 Telegram...',
     tg_api_base: 'Telegram API 地址（可选，自建反代用）',
+    tg_api_base_hint: '前缀式只填域名（自动补 /https://api.telegram.org）；路径式填完整地址，如 https://tg.域名/密钥',
     tg_warp_working: '正在检查/安装 WARP 并开启代理模式（可能要 1-2 分钟）...',
     seat_prefs: '取票偏好 · 优先级从上到下',
     seat_aisle: '靠过道',
@@ -581,6 +583,7 @@ var i18nDict = {
     tg_probing: 'Probing Telegram...',
     tg_testing: 'Requesting Telegram through the proxy...',
     tg_api_base: 'Telegram API base (optional, for your own reverse proxy)',
+    tg_api_base_hint: 'Prefix style: domain only (auto-appends /https://api.telegram.org). Path style: full URL like https://tg.domain/SECRET',
     tg_warp_working: 'Checking/installing WARP and enabling proxy mode (1-2 min)...',
     seat_prefs: 'Seat Preference - priority top to bottom',
     seat_aisle: 'Aisle',
@@ -869,7 +872,8 @@ function testProxy() {
     body: JSON.stringify({ url: url, base: base })
   }).then(function (r) { return r.json(); }).then(function (d) {
     if (!d) { setProxyStatus('error', 'error'); return; }
-    setProxyStatus((d.ok ? '✅ ' : '❌ ') + (d.message || '') + '  [' + (d.via || '') + ']', d.ok ? 'ok' : 'error');
+    if (d.ok && d.resolved) { document.getElementById('tg_api_base').value = d.resolved; }
+    setProxyStatus((d.ok ? '✅ ' : '❌ ') + (d.message || '') + '  [' + (d.resolved || d.via || '') + ']', d.ok ? 'ok' : 'error');
   }).catch(function (e) { setProxyStatus('' + e, 'error'); });
 }
 function enableWarp() {

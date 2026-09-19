@@ -347,7 +347,7 @@ def enable_warp_proxy(port=DEFAULT_WARP_PORT, auto_install=False, wait_seconds=4
 
 def test_api_base(base, token=None, timeout=12):
     """测自建反代（Cloudflare Worker 等）：直接 GET {base}/bot<token>/getMe"""
-    base = (base or "").strip().rstrip("/")
+    base = normalize_api_base(base)
     if not base:
         return False, "没有填写反代地址"
     url = base + "/"
@@ -454,8 +454,28 @@ def get_proxy_setting(cfg=None):
     return bool(enabled), url
 
 
+def normalize_api_base(base):
+    """把用户填的反代地址规范成「后面直接拼 /bot<token>/方法」的形式"""
+    base = (base or "").strip().rstrip("/")
+    if not base:
+        return ""
+    low = base.lower()
+    if "api.telegram.org" in base or "/http" in low:
+        return base
+    rest = base.split("://", 1)[1] if "://" in base else base
+    if "/" not in rest:
+        return base + "/https://api.telegram.org"
+    return base
+
+
 def get_api_base(cfg=None):
-    """自建反代地址（空 = 用官方 api.telegram.org）"""
+    """规范化后的反代地址（空 = 用官方 api.telegram.org）"""
+    raw = get_api_base_raw(cfg)
+    return normalize_api_base(raw)
+
+
+def get_api_base_raw(cfg=None):
+    """用户填的原始值（面板回显用）"""
     env = (os.environ.get("KTMB_TG_API_BASE") or "").strip()
     if env:
         return env.rstrip("/")

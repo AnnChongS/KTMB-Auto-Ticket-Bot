@@ -44,6 +44,13 @@
 
 ### 方案：Cloudflare Worker 反代（不用装任何软件）
 
+> **两种写法都支持**：
+> - **前缀式**（在完整地址前面加前缀，像 `https://worker.你的域名.com/https://api.telegram.org/bot<token>/getMe`）：
+>   「Telegram API 地址」**只填 `https://worker.你的域名.com/`** 就行，程序会自动补上 `/https://api.telegram.org`。
+> - **路径式**（`/密钥/bot<token>/方法`）：填 `https://tg.你的域名.com/密钥`，原样使用。
+> - 判断规则很简单：**只填域名（没有路径）= 前缀式；带路径 = 路径式**。
+
+
 如果你有 Cloudflare 账号和域名，这是**最省事**的方式（不用装 WARP、不用管理员、任何机器都能用）：
 
 1. Cloudflare → Workers & Pages → Create → Worker，粘贴：
@@ -88,7 +95,8 @@ WARP 客户端有三种模式：`warp`（全局接管）、`doh`（只换 DNS）
 | Clash / Clash Verge（混合端口） | `http://127.0.0.1:7890` |
 | v2rayN | `http://127.0.0.1:10809` |
 | 自己的 VPS（tinyproxy / 3proxy） | `http://你的IP:3128` |
-| **自建反代（Cloudflare Worker 等）** | **不填这一栏**，改填下面的「Telegram API 地址」，如 `https://tg.你的域名.com/密钥` |
+| **自建反代·前缀式（Cloudflare Worker 等）** | **不填这一栏**，改填下面的「Telegram API 地址」，例如只填 `https://worker.你的域名.com/`（程序自动补成 `https://worker.你的域名.com/https://api.telegram.org`） |
+| **自建反代·路径式（带密钥）** | 同样填「Telegram API 地址」：`https://tg.你的域名.com/密钥` |
 
 > `socks5h://` 的 **h** = 域名交给代理去解析（推荐）；写 `http://` 也可以。
 
@@ -267,7 +275,7 @@ python proxy_setup.py disable-base # 反代改回官方地址
 | `heartbeat_screenshot` | 心跳是否附带截图（true/false） |
 | `telegram_proxy` | 可选。Telegram 代理，如 `socks5h://127.0.0.1:40000`。可用 `proxy_setup.py` 或面板一键配置 |
 | `telegram_proxy_enabled` | 面板「启用 Telegram 代理」开关；`false` 时连环境变量 `KTMB_TG_PROXY` 都忽略 |
-| `telegram_api_base` | 自建反代地址（Cloudflare Worker 等），如 `https://tg.你的域名.com/密钥`；留空 = 官方 `api.telegram.org` |
+| `telegram_api_base` | 自建反代地址。前缀式填 `https://worker.你的域名.com/`（自动补全）；路径式填 `https://tg.你的域名.com/密钥`；留空 = 官方 `api.telegram.org` |
 
 ---
 

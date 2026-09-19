@@ -215,7 +215,12 @@ TG_FORCE_IPV4 = str(os.environ.get("KTMB_TG_IPV4", "0")).strip().lower() in ("1"
 # 填法：https://tg.你的域名.com/密钥   （程序会自动拼上 /bot<token>/方法名）
 _TG_API_RAW = (os.environ.get("KTMB_TG_API_BASE")
                or _NOTIF_CFG.get("telegram_api_base", "") or "").strip()
-TG_API_BASE = _TG_API_RAW.rstrip("/") if _TG_API_RAW else "https://api.telegram.org"
+TG_API_BASE = _TG_API_RAW.rstrip('/') if _TG_API_RAW else 'https://api.telegram.org'
+# 前缀式反代：只填了域名（没有路径）时自动补成 域名/https://api.telegram.org
+if TG_API_BASE != 'https://api.telegram.org' and 'api.telegram.org' not in TG_API_BASE:
+    _rest = TG_API_BASE.split('://', 1)[-1]
+    if '/http' not in TG_API_BASE.lower() and '/' not in _rest:
+        TG_API_BASE = TG_API_BASE + '/https://api.telegram.org'
 
 _tg_local = threading.local()
 _TG_IPV4_DONE = {"done": False}
