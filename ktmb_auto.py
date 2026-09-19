@@ -31,7 +31,8 @@ import signal
 import threading
 from datetime import datetime
 from playwright.sync_api import Playwright, sync_playwright
-from remote_control import save_screenshot, get_command, peek_command, execute_remote_command
+from remote_control import (save_screenshot, get_command, peek_command,
+                            execute_remote_command, cleanup as cleanup_remote_files)
 
 # ================= 📝 日志系统初始化 =================
 def setup_logging():
@@ -103,7 +104,11 @@ KTMB_PASSWORD = CFG.get("account", {}).get("password", "")
 
 BOT_ID = CFG.get("bot_settings", {}).get("bot_id", "1")
 BOT_NAME = f"Commander-{BOT_ID}"
-CHROME_DEBUG_PORT = CFG.get("bot_settings", {}).get("chrome_port", 9222)
+CHROME_DEBUG_PORT = int(os.environ.get("KTMB_CHROME_PORT")
+                        or CFG.get("bot_settings", {}).get("chrome_port", 9222))
+# 显示浏览器窗口（Windows 默认开启，方便人看着/接管；Linux 服务器可设 KTMB_HEADLESS=1）
+HEADLESS = str(os.environ.get("KTMB_HEADLESS", "1")).strip().lower() not in ("0", "false", "no", "off")
+CHROME_PROFILE_DIR = os.environ.get("KTMB_CHROME_PROFILE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profile")
 HEARTBEAT_INTERVAL = CFG.get("bot_settings", {}).get("heartbeat_interval", 100)
 REFRESH_INTERVAL = CFG.get("bot_settings", {}).get("refresh_interval", 180)
 
@@ -573,11 +578,12 @@ def safe_logout(page=None, notify=True):
                 logger.warning(f"[系统] HTTP 登出失败 ({attempt}/2): {e}")
                 time.sleep(1)
     else:
-        logger.warning("[系统] 没有缓存 cookies，只能尝试浏览器登出")
+        logger.info("[系统] 本次没有成功登录过，无需登出（跳过网络请求）")
+        ok = True
 
     if not ok and page is not None:
         try:
-            page.goto(KTMB_LOGOUT_URL, timeout=10000, wait_until="domcontentloaded")
+            page.goto(KTMB_LOGOUT_URL, timeout=6000, wait_until="domcontentloaded")
             time.sleep(1.5)
             ok = True
             logger.info("[系统] 浏览器登出完成")
@@ -1809,6 +1815,12 @@ def run(playwright: Playwright) -> None:
     """主运行函数"""
     global SHOULD_LOGOUT_AND_EXIT
 
+    # 清掉上一次残留的"停止/截图"命令文件，否则新进程一起来就自杀（表现为一直 loop）
+    try:
+        cleanup_remote_files()
+    except Exception:
+        pass
+
     # 开机立刻清空历史 Telegram 指令，防止一开机就执行以前的 /logout 导致自杀
     tg_offset = flush_telegram_updates()
 
@@ -1818,53 +1830,69 @@ def run(playwright: Playwright) -> None:
     launched_own_browser = False
 
     # 方式1: 尝试连接已有的 Chrome 调试进程
-    logger.info(f"[连接] 尝试连接 Chrome (Port {CHROME_DEBUG_PORT})...")
-    try:
-        browser = playwright.chromium.connect_over_cdp(f"http://localhost:{CHROME_DEBUG_PORT}")
-        context = browser.contexts[0]
-        page = context.pages[0] if context.pages else context.new_page()
-        page.set_viewport_size({"width": 1920, "height": 1080})
-        logger.info("[连接] 已连接到现有 Chrome 实例")
-    except Exception as e:
-        logger.warning(f"[连接] 无法连接现有 Chrome: {e}")
-        logger.info("[连接] 正在自动启动 Chromium 浏览器...")
+    mode = "无窗口(headless)" if HEADLESS else "可见窗口(headed)"
+    logger.info(f"[连接] 尝试接管已有 Chrome (Port {CHROME_DEBUG_PORT})...")
+    for _try in range(1, 6):
+        try:
+            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{CHROME_DEBUG_PORT}")
+            context = browser.contexts[0]
+            page = context.pages[0] if context.pages else context.new_page()
+            page.set_viewport_size({"width": 1920, "height": 1080})
+            logger.info(f"[连接] 已接管你在端口 {CHROME_DEBUG_PORT} 上打开的 Chrome")
+            break
+        except Exception as e:
+            browser = None
+            logger.debug(f"[连接] CDP 第 {_try} 次失败: {e}")
+            if _try == 5:
+                logger.info(f"[连接] 端口 {CHROME_DEBUG_PORT} 上没有现成 Chrome，"
+                            f"由机器人启动自己的 Chromium（{mode}）...")
+            else:
+                time.sleep(1)
 
-        # 预检：真的启动一次浏览器，失败就给可操作提示（而不是甩 Playwright 堆栈）
+    if browser is None:
+        # 预检：真的启动一次浏览器，失败就给可操作提示
         try:
             _probe = playwright.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
             _probe.close()
         except Exception as probe_err:
             detail = str(probe_err).strip().splitlines()[0][:200]
-            browsers_path = os.environ.get('PLAYWRIGHT_BROWSERS_PATH') or '(默认缓存)'
             hint = (f"浏览器无法启动: {detail}\n"
-                    f"下载目录: {browsers_path}\n"
+                    f"下载目录: {os.environ.get('PLAYWRIGHT_BROWSERS_PATH') or '(默认缓存)'}\n"
                     "请在项目目录执行:\n"
                     "venv\\Scripts\\python.exe -m playwright install chromium")
             logger.error("[连接] " + hint.replace(chr(10), " | "))
             send_notification("❌ <b>浏览器无法启动</b>\n" + hint)
             return
 
-        # 方式2: 自动启动新的 Chromium 实例
         try:
-            browser = playwright.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--window-size=1920,1080'
-                ]
-            )
-            context = browser.new_context(
+            os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
+            args = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--window-size=1920,1080',
+                f'--remote-debugging-port={CHROME_DEBUG_PORT}',
+                '--no-first-run',
+                '--no-default-browser-check',
+            ]
+            if HEADLESS:
+                args.append('--disable-gpu')
+            else:
+                args.append('--start-maximized')
+            context = playwright.chromium.launch_persistent_context(
+                CHROME_PROFILE_DIR,
+                headless=HEADLESS,
+                args=args,
                 viewport={"width": 1920, "height": 1080},
-                ignore_https_errors=True
+                ignore_https_errors=True,
             )
-            page = context.new_page()
+            page = context.pages[0] if context.pages else context.new_page()
             launched_own_browser = True
-            logger.info("[连接] Chromium 已自动启动")
+            logger.info(f"[连接] Chromium 已启动（{mode}）")
+            logger.info(f"[连接]   调试端口: {CHROME_DEBUG_PORT}   （chrome://inspect 可接管）")
+            logger.info(f"[连接]   用户数据: {CHROME_PROFILE_DIR}")
         except Exception as e2:
-            logger.error(f"[连接] 自动启动 Chromium 失败: {e2}")
+            logger.error(f"[连接] 启动 Chromium 失败: {e2}")
             send_notification(f"❌ 浏览器启动失败: {e2}")
             return
 

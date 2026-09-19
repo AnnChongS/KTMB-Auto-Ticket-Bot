@@ -12,3 +12,4 @@ browsers/
 screenshot_*.png
 bot.log.*
 ktmb_web.pid
+chrome_profile/
