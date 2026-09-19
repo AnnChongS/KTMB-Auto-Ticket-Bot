@@ -16,7 +16,8 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 #
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file
+from flask import (Flask, render_template, request, jsonify, session, redirect,
+                   url_for, Response)
 import json
 import os
 import subprocess
@@ -25,7 +26,9 @@ import time
 import signal
 import secrets
 import logging
-from remote_control import SCREENSHOT_PATH, send_command, request_screenshot
+import remote_control
+from remote_control import (SCREENSHOT_PATH, send_command, request_screenshot,
+                            read_result, screenshot_state)
 
 # ================= 📝 日志系统 =================
 logging.basicConfig(
@@ -35,8 +38,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger('KTMB_Web')
 
+def _load_secret_key():
+    """会话密钥持久化：以前每次重启 app.py 都会随机换 key，所有登录状态失效"""
+    env_key = os.environ.get('FLASK_SECRET_KEY')
+    if env_key:
+        return env_key
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.flask_secret')
+    try:
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                key = f.read().strip()
+            if key:
+                return key
+        key = secrets.token_hex(32)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(key)
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+        return key
+    except Exception:
+        return secrets.token_hex(32)
+
+
 app = Flask(__name__)
-app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(32))
+app.secret_key = _load_secret_key()
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
@@ -45,6 +72,7 @@ app.config.update(
 
 CONFIG_FILE = "config.json"
 LOG_FILE = "bot.log"
+BOT_PID_FILE = ".ktmb_bot.pid"
 
 # Web 面板访问密码（可通过环境变量设置，默认为 admin123）
 WEB_PASSWORD = os.environ.get('KTMB_WEB_PASSWORD', 'admin123')
@@ -54,6 +82,7 @@ MAX_LOG_LINES = int(os.environ.get('KTMB_MAX_LOG_LINES', '200'))
 
 bot_process = None
 bot_log_file_handle = None  # 保存日志文件句柄引用
+bot_started_at = None
 
 if not os.path.exists(LOG_FILE):
     open(LOG_FILE, 'w', encoding='utf-8').close()
@@ -63,6 +92,150 @@ _BROWSER_PROBE = ("import os,sys;"
                   "from playwright.sync_api import sync_playwright as s;"
                   "pw=s().start();e=pw.chromium.executable_path;pw.stop();"
                   "print(e);sys.exit(0 if os.path.exists(e) else 3)")
+
+
+# ================= 🧩 机器人进程管理 =================
+
+def _read_bot_pid():
+    try:
+        with open(BOT_PID_FILE, 'r', encoding='utf-8') as f:
+            return int((f.read() or '').strip())
+    except Exception:
+        return None
+
+
+def _write_bot_pid(pid):
+    try:
+        with open(BOT_PID_FILE, 'w', encoding='utf-8') as f:
+            f.write(str(pid))
+    except Exception:
+        pass
+
+
+def _clear_bot_pid():
+    try:
+        if os.path.exists(BOT_PID_FILE):
+            os.remove(BOT_PID_FILE)
+    except Exception:
+        pass
+
+
+def _no_window_kwargs():
+    """Windows 上调 tasklist/wmic/taskkill 不要闪黑框"""
+    if os.name == 'nt':
+        try:
+            return {'creationflags': subprocess.CREATE_NO_WINDOW}
+        except Exception:
+            return {}
+    return {}
+
+
+def _pid_alive(pid):
+    if not pid:
+        return False
+    if os.name == 'nt':
+        try:
+            out = subprocess.run(['tasklist', '/FI', f'PID eq {pid}'],
+                                 capture_output=True, text=True, timeout=10,
+                                 **_no_window_kwargs())
+            return str(pid) in (out.stdout or '')
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _pid_is_our_bot(pid):
+    """确认这个 PID 真的是 ktmb_auto.py，避免误杀别人的进程"""
+    if not pid:
+        return False
+    try:
+        if os.name == 'nt':
+            for cmd in (['wmic', 'process', 'where', f'processid={pid}', 'get', 'commandline'],
+                        ['powershell', '-NoProfile', '-Command',
+                         f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"]):
+                try:
+                    out = subprocess.run(cmd, capture_output=True, text=True, timeout=15,
+                                         **_no_window_kwargs())
+                    text = (out.stdout or '') + (out.stderr or '')
+                    if 'ktmb_auto.py' in text:
+                        return True
+                    if 'ProcessId' in text or 'No Instance' in text:
+                        return False
+                except Exception:
+                    continue
+            return False
+        with open(f'/proc/{pid}/cmdline', 'rb') as f:
+            return b'ktmb_auto.py' in f.read()
+    except Exception:
+        # 查不到命令行时保守处理：Windows 上不冒险强杀，Linux 上允许
+        return os.name != 'nt'
+
+
+def _kill_pid(pid):
+    if not pid:
+        return
+    try:
+        if os.name == 'nt':
+            subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)],
+                           capture_output=True, text=True, timeout=15,
+                           **_no_window_kwargs())
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except Exception as e:
+        logger.warning(f"强制结束进程 {pid} 失败: {e}")
+
+
+def _reap_bot():
+    """机器人自己退出后：关掉日志句柄、清掉 PID 文件"""
+    global bot_process, bot_log_file_handle, bot_started_at
+    if bot_process is not None and bot_process.poll() is not None:
+        logger.info(f"机器人进程已退出（退出码 {bot_process.returncode}）")
+        if bot_log_file_handle:
+            try:
+                bot_log_file_handle.close()
+            except Exception:
+                pass
+            bot_log_file_handle = None
+        bot_process = None
+        bot_started_at = None
+        _clear_bot_pid()
+        return True
+    return False
+
+
+def _bot_heartbeat_fresh(seconds=20):
+    """机器人每几秒就会写一帧截图；文件很新 = 它确实活着
+
+    这是 Windows 上 wmic 被移除 / 权限不足时的兜底判断。
+    """
+    try:
+        state = screenshot_state()
+        age = state.get("age")
+        pid = state.get("pid")
+        if not state.get("has_screenshot") or age is None or age > seconds or not pid:
+            return False
+        return _pid_alive(int(pid))
+    except Exception:
+        return False
+
+
+def bot_is_running():
+    """机器人是否在跑（面板重启过也能认出来）"""
+    _reap_bot()
+    if bot_process is not None and bot_process.poll() is None:
+        return True
+    pid = _read_bot_pid()
+    if pid and _pid_alive(pid) and _pid_is_our_bot(pid):
+        return True
+    if pid and not _pid_alive(pid):
+        _clear_bot_pid()
+    return _bot_heartbeat_fresh()
 
 
 def ensure_playwright_browser(env):
@@ -185,12 +358,14 @@ def api_save():
 @app.route('/api/start', methods=['POST'])
 def api_start():
     """启动机器人 API"""
-    global bot_process, bot_log_file_handle
+    global bot_process, bot_log_file_handle, bot_started_at
     if not is_authenticated():
         return jsonify({"status": "error", "message": "未认证"}), 401
 
-    if bot_process and bot_process.poll() is None:
-        return jsonify({"status": "error", "message": "机器人已经在运行中！"})
+    if bot_is_running():
+        # 同一个 Telegram Token / 同一个 Chrome 端口同时跑两个实例会互相抢指令（HTTP 409），
+        # 这正是一些"Telegram 时好时坏"的来源，所以这里必须拦住
+        return jsonify({"status": "error", "message": "机器人已经在运行中！（请先点停止）"})
 
     try:
         with open(LOG_FILE, 'w', encoding='utf-8') as f:
@@ -226,7 +401,9 @@ def api_start():
             encoding='utf-8',
             env=env
         )
-        logger.info("机器人已启动")
+        bot_started_at = time.time()
+        _write_bot_pid(bot_process.pid)
+        logger.info(f"机器人已启动 (PID {bot_process.pid})")
         return jsonify({"status": "success", "message": "机器人已启动！"})
     except FileNotFoundError:
         logger.error("找不到 Python 解释器或 ktmb_auto.py")
@@ -236,17 +413,26 @@ def api_start():
         return jsonify({"status": "error", "message": f"启动失败: {str(e)}"}), 500
 
 
-def stop_bot(timeout=45):
+def stop_bot(timeout=60):
     """安全停止机器人
 
     Windows 上 Popen.terminate() 是硬杀（TerminateProcess），机器人没机会登出 KTMB，
-    会触发 30 分钟冷却。所以这里先用命令文件让 bot 自己安全登出退出，超时才强杀
-    （Linux 下另外补一个 SIGTERM，更快）。
+    会触发 30 分钟冷却。所以这里先写 logout 命令文件让 bot 自己安全登出，超时才强杀。
+    面板重启过（拿不到 Popen 句柄）时用 PID 文件继续兜底。
     """
-    global bot_process, bot_log_file_handle
-    if not (bot_process and bot_process.poll() is None):
-        bot_process = None
-        return False
+    global bot_process, bot_log_file_handle, bot_started_at
+    _reap_bot()
+
+    proc = bot_process if (bot_process is not None and bot_process.poll() is None) else None
+    pid = _read_bot_pid()
+    knows_pid = bool(pid and _pid_alive(pid) and _pid_is_our_bot(pid))
+    if proc is None and not knows_pid:
+        if not _bot_heartbeat_fresh(30):
+            _clear_bot_pid()
+            bot_process = None
+            return False
+        logger.warning("没有 PID 句柄，但机器人仍在发布画面：用指令文件请它登出")
+        pid = None
 
     try:
         send_command('logout')
@@ -254,27 +440,47 @@ def stop_bot(timeout=45):
     except Exception as e:
         logger.warning(f"发送登出指令失败: {e}")
 
-    if os.name != 'nt':
+    if proc is not None and os.name != 'nt':
         try:
-            bot_process.terminate()   # Linux: SIGTERM，bot 会先安全登出
+            proc.terminate()   # Linux: SIGTERM，bot 会先安全登出
         except Exception:
             pass
 
     deadline = time.time() + timeout
-    while time.time() < deadline and bot_process.poll() is None:
+    while time.time() < deadline:
+        if proc is not None:
+            if proc.poll() is not None:
+                break
+        elif pid:
+            if not _pid_alive(pid):
+                break
+        elif not _bot_heartbeat_fresh(15):
+            break
         time.sleep(0.5)
 
-    if bot_process.poll() is None:
+    if proc is not None:
+        alive = proc.poll() is None
+    elif pid:
+        alive = _pid_alive(pid)
+    else:
+        alive = _bot_heartbeat_fresh(15)
+
+    if alive:
         logger.warning("机器人未响应登出指令，强制结束")
         try:
-            bot_process.kill()
-            bot_process.wait(timeout=5)
+            if proc is not None:
+                proc.kill()
+                proc.wait(timeout=5)
+            else:
+                _kill_pid(pid)
         except Exception:
             pass
     else:
         logger.info("机器人已安全登出并退出")
 
     bot_process = None
+    bot_started_at = None
+    _clear_bot_pid()
     if bot_log_file_handle:
         try:
             bot_log_file_handle.close()
@@ -304,8 +510,17 @@ def api_status():
     if not is_authenticated():
         return jsonify({"running": False, "error": "未认证"}), 401
 
-    is_running = bot_process is not None and bot_process.poll() is None
-    return jsonify({"running": is_running})
+    running = bot_is_running()
+    state = screenshot_state()
+    return jsonify({
+        "running": running,
+        "pid": _read_bot_pid(),
+        "started_at": bot_started_at,
+        "screenshot_age": state.get("age"),
+        "phase": state.get("phase", ""),
+        "page_url": state.get("url", ""),
+        "telegram": state.get("telegram", ""),
+    })
 
 
 @app.route('/api/logs', methods=['GET'])
@@ -361,38 +576,95 @@ def remote_page():
 
 @app.route('/api/remote/screenshot')
 def api_remote_screenshot():
-    """获取当前浏览器截图"""
+    """获取当前浏览器画面
+
+    v1.3.2：机器人现在会持续把画面发布到文件（默认每 5 秒一帧），这里直接把最新一帧
+    返回即可。以前是"面板写请求 -> 等机器人截 -> 3 秒超时"，机器人一忙就永远超时，
+    /remote 页面就只剩"连接中..."。
+    """
     if not is_authenticated():
         return jsonify({"status": "error", "message": "未认证"}), 401
-    
-    # 请求截图
-    request_screenshot()
-    
-    # 等待截图生成（最多3秒）
-    import time
-    for _ in range(15):
-        time.sleep(0.2)
-        if os.path.exists(SCREENSHOT_PATH):
-            return send_file(SCREENSHOT_PATH, mimetype='image/png')
-    
-    return jsonify({"status": "error", "message": "截图超时"}), 504
+
+    if not os.path.exists(SCREENSHOT_PATH):
+        request_screenshot()
+        for _ in range(30):          # 等机器人产出第一帧，最多 6 秒
+            if os.path.exists(SCREENSHOT_PATH):
+                break
+            time.sleep(0.2)
+
+    if not os.path.exists(SCREENSHOT_PATH):
+        running = bot_is_running()
+        return jsonify({
+            "status": "error",
+            "bot_running": running,
+            "message": "机器人没有在运行，先到主页点「启动抢票」" if not running
+                       else "机器人还没产出画面（刚启动或正卡在某个页面）",
+        }), 503
+
+    try:
+        with open(SCREENSHOT_PATH, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return jsonify({"status": "error", "message": "读取截图失败"}), 503
+
+    resp = Response(data, mimetype='image/png')
+    state = screenshot_state()
+    resp.headers['Cache-Control'] = 'no-store, max-age=0'
+    resp.headers['X-Screenshot-Age'] = f"{state.get('age') if state.get('age') is not None else -1}"
+    resp.headers['X-Bot-Running'] = '1' if bot_is_running() else '0'
+    return resp
+
+
+@app.route('/api/remote/state')
+def api_remote_state():
+    """远程控制页面的状态（画面是否新鲜 / 机器人在不在跑 / 当前阶段）"""
+    if not is_authenticated():
+        return jsonify({"status": "error", "message": "未认证"}), 401
+    state = screenshot_state()
+    state['bot_running'] = bot_is_running()
+    state['stale_after'] = remote_control.SCREENSHOT_STALE_AFTER
+    return jsonify(state)
+
+
+@app.route('/api/remote/request', methods=['POST'])
+def api_remote_request_shot():
+    """强制机器人立刻截一帧（比等下一次自动发布快）"""
+    if not is_authenticated():
+        return jsonify({"status": "error", "message": "未认证"}), 401
+    ok = request_screenshot()
+    return jsonify({"status": "success" if ok else "error"})
 
 
 @app.route('/api/remote/<action>', methods=['POST'])
 def api_remote_action(action):
-    """执行远程控制命令"""
+    """执行远程控制命令，并把机器人的真实执行结果回给页面"""
     if not is_authenticated():
         return jsonify({"status": "error", "message": "未认证"}), 401
-    
-    data = request.json or {}
-    
-    # 发送命令给bot
-    if send_command(action, **data):
-        # 等待命令执行完成 (最多10秒)
-        import time
-        time.sleep(1)
-        return jsonify({"status": "success", "message": f"命令已发送: {action}"})
-    return jsonify({"status": "error", "message": "发送命令失败"}), 500
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        data = {}
+    data.pop('action', None)
+    data.pop('id', None)
+
+    request_id = send_command(action, **data)
+    if not request_id:
+        return jsonify({"status": "error", "message": "指令写入失败（检查系统临时目录权限）"}), 500
+
+    if action in ('logout', 'stop', 'shutdown'):
+        return jsonify({"status": "success", "message": "已请求机器人停止并安全登出 KTMB"})
+
+    for _ in range(40):              # 最多等 8 秒
+        time.sleep(0.2)
+        result = read_result(request_id)
+        if result:
+            return jsonify({"status": result.get('status', 'error'),
+                            "message": result.get('message', '')})
+
+    return jsonify({
+        "status": "error",
+        "message": "机器人没有响应：可能没在运行，或正忙着某个页面（可以去主页看日志）",
+    }), 504
 
 
 # ================= 🚀 启动入口 =================

@@ -13,3 +13,6 @@ screenshot_*.png
 bot.log.*
 ktmb_web.pid
 chrome_profile/
+.flask_secret
+.ktmb_bot.pid
+run.log

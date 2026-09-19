@@ -40,9 +40,32 @@ pick_port() {
   echo "$p"
 }
 
+kill_stray_bots() {
+  # 面板被强杀 / 重启时，机器人可能变成"孤儿进程"，这里顺手收掉
+  local pids
+  pids="$(pgrep -u "$(id -u)" -f 'ktmb_auto\.py' 2>/dev/null || true)"
+  [ -z "$pids" ] && return 0
+  warn "发现残留的机器人进程: $pids，正在安全停止..."
+  printf '{"action":"logout"}' > "${TMPDIR:-/tmp}/ktmb_remote_command.json" 2>/dev/null || true
+  for pid in $pids; do
+    kill -TERM "$pid" 2>/dev/null
+  done
+  for _ in $(seq 1 30); do
+    pids="$(pgrep -u "$(id -u)" -f 'ktmb_auto\.py' 2>/dev/null || true)"
+    [ -z "$pids" ] && break
+    sleep 1
+  done
+  pids="$(pgrep -u "$(id -u)" -f 'ktmb_auto\.py' 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    warn "仍有机器人进程未退出，强制结束: $pids"
+    kill -KILL $pids 2>/dev/null
+  fi
+}
+
 stop_panel() {
   if [ ! -f "$PID_FILE" ]; then
     warn "没有找到 PID 文件，服务可能未通过本脚本启动"
+    kill_stray_bots
     return 0
   fi
   local pid
@@ -63,6 +86,7 @@ stop_panel() {
     warn "PID 文件中的进程不存在"
   fi
   rm -f "$PID_FILE"
+  kill_stray_bots
 }
 
 ensure_venv() {
@@ -80,7 +104,7 @@ ensure_python_deps() {
 
 ensure_system_libs() {
   local missing=0
-  for pkg in libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libgbm1 libasound2; do
+  for pkg in libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libgbm1 libasound2 libxshmfence1 libcups2; do
     dpkg -l 2>/dev/null | grep -q "^ii  $pkg " || missing=1
   done
   [ "$missing" -eq 0 ] && return 0
@@ -122,6 +146,7 @@ start_panel() {
   ensure_browser
 
   info "启动 Web 管理面板: http://$WEB_HOST:$WEB_PORT"
+  info "远程控制页面: http://$WEB_HOST:$WEB_PORT/remote"
   KTMB_WEB_PORT="$WEB_PORT" KTMB_WEB_HOST="$WEB_HOST" \
     nohup "$PY" app.py >>"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"
@@ -132,7 +157,8 @@ start_panel() {
     echo "==================================================="
     echo "  🎉 启动成功"
     echo "  🌐 管理面板 : http://$WEB_HOST:$WEB_PORT"
-    echo "  🔐 默认密码 : admin123 (可用 KTMB_WEB_PASSWORD 修改)"
+    echo "  🎮 远程控制 : http://$WEB_HOST:$WEB_PORT/remote"
+  echo "  🔐 默认密码 : admin123 (可用 KTMB_WEB_PASSWORD 修改)"
     echo "  📋 面板日志 : tail -f $LOG_FILE"
     echo "  🛑 停止服务 : ./start_linux.sh stop"
     echo "==================================================="

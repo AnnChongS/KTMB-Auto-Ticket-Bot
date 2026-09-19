@@ -31,8 +31,9 @@ import signal
 import threading
 from datetime import datetime
 from playwright.sync_api import Playwright, sync_playwright
-from remote_control import (save_screenshot, get_command, peek_command,
-                            execute_remote_command, cleanup as cleanup_remote_files)
+from remote_control import (publish_screenshot, get_command, peek_command,
+                            execute_remote_command, send_result,
+                            cleanup as cleanup_remote_files)
 
 # ================= 📝 日志系统初始化 =================
 def setup_logging():
@@ -109,8 +110,14 @@ CHROME_DEBUG_PORT = int(os.environ.get("KTMB_CHROME_PORT")
 # 显示浏览器窗口（Windows 默认开启，方便人看着/接管；Linux 服务器可设 KTMB_HEADLESS=1）
 HEADLESS = str(os.environ.get("KTMB_HEADLESS", "1")).strip().lower() not in ("0", "false", "no", "off")
 CHROME_PROFILE_DIR = os.environ.get("KTMB_CHROME_PROFILE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profile")
-HEARTBEAT_INTERVAL = CFG.get("bot_settings", {}).get("heartbeat_interval", 100)
-REFRESH_INTERVAL = CFG.get("bot_settings", {}).get("refresh_interval", 180)
+try:
+    HEARTBEAT_INTERVAL = max(1, int(CFG.get("bot_settings", {}).get("heartbeat_interval", 100) or 100))
+except Exception:
+    HEARTBEAT_INTERVAL = 100
+try:
+    REFRESH_INTERVAL = max(5, int(CFG.get("bot_settings", {}).get("refresh_interval", 180) or 180))
+except Exception:
+    REFRESH_INTERVAL = 180
 
 TELEGRAM_BOT_TOKEN = CFG.get("notification", {}).get("telegram_token", "")
 TELEGRAM_CHAT_ID = CFG.get("notification", {}).get("telegram_chat_id", "")
@@ -182,21 +189,113 @@ TG_RETRY_DELAY = 2  # 秒
 # ==========================================================
 
 
-_TG_NET = {"down": False, "last_log": 0.0}
+_TG_NET = {"down": False, "last_log": 0.0, "reason": ""}
+
+# Telegram 网络参数（可写在 config.json 的 notification 里，也可用环境变量覆盖）
+#   telegram_proxy : "http://127.0.0.1:7890" 指定代理；填 "off" / "direct" 表示强制直连（忽略系统代理）
+TG_PROXY = (os.environ.get("KTMB_TG_PROXY")
+            or (CFG.get("notification", {}) or {}).get("telegram_proxy", "") or "").strip()
+TG_FORCE_IPV4 = str(os.environ.get("KTMB_TG_IPV4", "0")).strip().lower() in ("1", "true", "yes", "on")
+
+_tg_local = threading.local()
+_TG_IPV4_DONE = {"done": False}
 
 
-def _tg_net_fail(where, err):
-    """Telegram 连不上时的统一处理：不重试、不刷屏，每 60 秒提示一次"""
-    now = time.time()
-    first = not _TG_NET["down"]
+def _tg_reset_session():
+    _tg_local.session = None
+
+
+def _force_tg_ipv4():
+    """很多 Windows 机器的 IPv6 是半残的：api.telegram.org 解析到 AAAA 后就一直连不上。
+    网络层失败时自动切换成"只走 IPv4"再试，只做一次并且写进日志。"""
+    if _TG_IPV4_DONE["done"]:
+        return
+    _TG_IPV4_DONE["done"] = True
+    try:
+        import socket
+        import urllib3.util.connection as u3c
+        u3c.allowed_gai_family = lambda: socket.AF_INET
+        _tg_reset_session()
+        logger.warning("[TG] 连接失败，已切换为强制 IPv4 重试")
+    except Exception as e:
+        logger.debug(f"[TG] 切换 IPv4 失败: {e}")
+
+
+def _tg_session():
+    """每个线程一个连接池：复用 TCP/TLS 连接，弱网下比每次新建连接稳得多"""
+    sess = getattr(_tg_local, "session", None)
+    if sess is not None:
+        return sess
+    sess = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=4, max_retries=0)
+    sess.mount("https://", adapter)
+    sess.mount("http://", adapter)
+    proxy = TG_PROXY.lower()
+    if proxy in ("off", "none", "direct", "no-proxy", "-"):
+        sess.trust_env = False
+        sess.proxies = {}
+    elif TG_PROXY:
+        sess.trust_env = False
+        sess.proxies = {"http": TG_PROXY, "https": TG_PROXY}
+    logger.info(f"[TG] 已建立连接池会话 (代理: {TG_PROXY or '跟随系统'})")
+    _tg_local.session = sess
+    return sess
+
+
+def _tg_call(method, url, retries=TG_MAX_RETRIES, **kwargs):
+    """统一的 Telegram 请求：连接复用 + 自动重试 + 明确的失败原因
+
+    返回 (response, error_text)；response 为 None 表示网络层彻底失败。
+    """
+    last = ""
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            resp = _tg_session().request(method, url, **kwargs)
+        except requests.exceptions.SSLError as e:
+            last = f"SSL 证书错误: {str(e)[:120]}"
+        except requests.exceptions.RequestException as e:
+            last = f"{type(e).__name__}: {str(e)[:120]}"
+            _force_tg_ipv4()
+        else:
+            if resp.status_code == 200:
+                _tg_ok()
+                return resp, None
+            if resp.status_code in (429, 500, 502, 503, 504):
+                last = f"HTTP {resp.status_code}"
+            else:
+                return resp, None
+        if attempt < retries:
+            time.sleep(TG_RETRY_DELAY * attempt)
+    _tg_net_fail(None, last)
+    return None, last
+
+
+def _tg_error_detail(resp):
+    try:
+        data = resp.json()
+        return str(data.get("description") or data)[:160]
+    except Exception:
+        try:
+            return resp.text[:160]
+        except Exception:
+            return ""
+
+
+def _tg_net_fail(where=None, err=None):
+    """Telegram 连不上时的统一处理：不刷屏，每 60 秒提示一次，并说明真实原因"""
+    if err is None:
+        err = _TG_NET.get("reason") or "未知错误"
+    _TG_NET["reason"] = str(err)
     _TG_NET["down"] = True
-    if first or now - _TG_NET["last_log"] >= 60:
+    now = time.time()
+    if where or now - _TG_NET["last_log"] >= 60:
+        first = _TG_NET["last_log"] <= 0
         _TG_NET["last_log"] = now
         if first:
-            logger.warning(f"[TG] 连不上 api.telegram.org（{str(err)[:90]}）")
-            logger.warning("[TG] 通知与 Telegram 指令暂时不可用；可改用网页端远程控制页；网络恢复后会自动继续")
+            logger.warning(f"[TG] 连不上 api.telegram.org：{str(err)[:120]}")
+            logger.warning("[TG] 通知与 Telegram 指令暂时不可用；网页端 /remote 仍可用；网络恢复后会自动继续")
         else:
-            logger.info("[TG] 仍无法连接 Telegram，稍后自动重试")
+            logger.info(f"[TG] 仍连不上 Telegram（{str(err)[:60]}），稍后自动重试")
 
 
 def _tg_ok():
@@ -206,10 +305,10 @@ def _tg_ok():
 
 
 def send_notification(message):
-    """发送 Telegram 文字通知，带重试机制"""
+    """发送 Telegram 文字通知（连接复用 + 自动重试）"""
     current_time = datetime.now().strftime('%H:%M:%S')
     formatted_msg = f"<b>[{BOT_NAME}] {current_time}</b>\n{message}"
-    logger.info(f"[TG通知] {message[:80]}...")
+    logger.info(f"[TG通知] {message[:80]}")
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -217,29 +316,26 @@ def send_notification(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": formatted_msg, "parse_mode": "HTML"}
 
-    for attempt in range(TG_MAX_RETRIES):
-        try:
-            resp = requests.post(url, data=data, timeout=10)
-            if resp.status_code == 200:
-                return
-            logger.warning(f"[TG通知] 发送失败 (HTTP {resp.status_code})，重试 {attempt + 1}/{TG_MAX_RETRIES}")
-        except requests.exceptions.ConnectionError as e:
-            _tg_net_fail("发送通知", e)
-            return
-        except requests.exceptions.Timeout:
-            logger.debug(f"[TG通知] 请求超时，重试 {attempt + 1}/{TG_MAX_RETRIES}")
-        except Exception as e:
-            logger.debug(f"[TG通知] 发送异常: {e}，重试 {attempt + 1}/{TG_MAX_RETRIES}")
-
-        if attempt < TG_MAX_RETRIES - 1:
-            time.sleep(TG_RETRY_DELAY * (attempt + 1))
-
-    logger.debug("[TG通知] 未送达")
+    resp, err = _tg_call("POST", url, data=data, timeout=15)
+    if resp is None:
+        return
+    if resp.status_code == 200:
+        return
+    detail = _tg_error_detail(resp)
+    if resp.status_code == 401:
+        logger.error("[TG] Bot Token 无效（HTTP 401），请在面板「通知」里重新填写 telegram_token")
+    elif resp.status_code == 400 and "chat not found" in detail.lower():
+        logger.error("[TG] chat_id 不正确（chat not found）：请先给机器人发一条消息再获取 chat_id")
+    else:
+        logger.warning(f"[TG通知] 发送失败（HTTP {resp.status_code}）: {detail}")
 
 
 def send_telegram_photo(caption, image_bytes):
-    """发送 Telegram 截图通知，带重试机制"""
+    """发送 Telegram 截图通知（连接复用 + 自动重试；caption 过长会被截断）"""
+    if not image_bytes:
+        return
     current_time = datetime.now().strftime('%H:%M:%S')
+    caption = str(caption)[:900]
     formatted_caption = f"<b>[{BOT_NAME}] {current_time}</b>\n{caption}"
     logger.info("[TG通知] 正在发送屏幕截图...")
 
@@ -247,30 +343,27 @@ def send_telegram_photo(caption, image_bytes):
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    files = {'photo': image_bytes}
     data = {"chat_id": TELEGRAM_CHAT_ID, "caption": formatted_caption, "parse_mode": "HTML"}
 
-    for attempt in range(TG_MAX_RETRIES):
-        try:
-            resp = requests.post(url, data=data, files=files, timeout=30)
-            if resp.status_code == 200:
-                return
-            logger.warning(f"[TG截图] 发送失败 (HTTP {resp.status_code})，重试 {attempt + 1}/{TG_MAX_RETRIES}")
-        except requests.exceptions.ConnectionError as e:
-            _tg_net_fail("发送截图", e)
+    for attempt in range(1, TG_MAX_RETRIES + 1):
+        files = {"photo": ("screen.png", image_bytes, "image/png")}
+        resp, err = _tg_call("POST", url, retries=1, data=data, files=files, timeout=40)
+        if resp is not None and resp.status_code == 200:
             return
-        except requests.exceptions.Timeout:
-            logger.debug(f"[TG截图] 请求超时，重试 {attempt + 1}/{TG_MAX_RETRIES}")
-        except Exception as e:
-            logger.debug(f"[TG截图] 发送异常: {e}，重试 {attempt + 1}/{TG_MAX_RETRIES}")
-
-        if attempt < TG_MAX_RETRIES - 1:
-            time.sleep(TG_RETRY_DELAY * (attempt + 1))
+        if resp is not None and resp.status_code not in (429, 500, 502, 503, 504):
+            logger.warning(f"[TG截图] 发送失败（HTTP {resp.status_code}）: {_tg_error_detail(resp)}")
+            return
+        if attempt < TG_MAX_RETRIES:
+            time.sleep(TG_RETRY_DELAY * attempt)
 
     logger.error("[TG截图] 所有重试均失败，截图未送达")
 
 
 BOT_START_TS = int(time.time())
+
+
+# 同一批 getUpdates 里多余的指令先存这里，逐条交给流程处理（避免被丢弃）
+_TG_BATCH = []
 
 
 def _is_stale_message(message):
@@ -290,18 +383,19 @@ def prime_telegram_offset():
     """只取 offset、丢弃积压的旧消息；绝不执行其中任何一条"""
     if not TELEGRAM_BOT_TOKEN:
         return None
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    resp, err = _tg_call("GET", url, retries=2,
+                         params={"timeout": 0, "allowed_updates": ["message"]}, timeout=15)
+    if resp is None or resp.status_code != 200:
+        return None
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-        resp = requests.get(url, params={"timeout": 0, "allowed_updates": ["message"]}, timeout=10)
-        resp.raise_for_status()
-        _tg_ok()
         data = resp.json()
         results = data.get("result", []) if data.get("ok") else []
         if results:
             logger.info(f"[TG] 丢弃 {len(results)} 条积压的旧消息（避免旧指令被重放）")
             return results[-1]["update_id"] + 1
-    except requests.exceptions.RequestException as e:
-        _tg_net_fail("初始化指令偏移", e)
+    except Exception as e:
+        logger.debug(f"[TG] 解析 getUpdates 失败: {e}")
     return None
 
 
@@ -461,12 +555,16 @@ def parse_telegram_command(text):
 def check_telegram_command(offset=None, long_poll=False):
     """检查 Telegram 是否有新指令
 
-    long_poll=True 时用长轮询（timeout=20）：有消息立刻返回，没有就挂着等，
-    比"每 3 秒问一次"快得多，请求数也少得多（你之前觉得慢就是这个原因）。
+    long_poll=True 时用长轮询（timeout=20）：有消息立刻返回，没有就挂着等。
+    一批里有多个指令时会依次返回，不会像以前那样只留第一条、其它被丢掉。
     """
     global SHOULD_LOGOUT_AND_EXIT
     if not TELEGRAM_BOT_TOKEN:
         return None, None, offset
+
+    if _TG_BATCH:
+        cmd, target = _TG_BATCH.pop(0)
+        return cmd, target, offset
 
     wait_s = 20 if long_poll else 0
     try:
@@ -475,9 +573,22 @@ def check_telegram_command(offset=None, long_poll=False):
         if offset:
             params["offset"] = offset
 
-        resp = requests.get(url, params=params, timeout=wait_s + 10)
-        resp.raise_for_status()
-        _tg_ok()
+        resp, err = _tg_call("GET", url, retries=1 if long_poll else 2,
+                             params=params, timeout=wait_s + 10)
+        if resp is None:
+            return None, None, offset
+        if resp.status_code == 409:
+            if throttle_ok("tg_409", 300):
+                logger.error("[TG] HTTP 409：同一个 Bot Token 正在被另一个程序 getUpdates。"
+                             "请确认只运行了一个机器人实例，否则指令会被随机抢走")
+            return None, None, offset
+        if resp.status_code == 401:
+            if throttle_ok("tg_401", 300):
+                logger.error("[TG] HTTP 401：telegram_token 无效，请在面板「通知」里重新填写")
+            return None, None, offset
+        if resp.status_code != 200:
+            return None, None, offset
+
         data = resp.json()
         results = data.get("result", []) if data.get("ok") else []
         if not results:
@@ -496,13 +607,15 @@ def check_telegram_command(offset=None, long_poll=False):
             if command == "/logout" and (target_id == "all" or target_id == BOT_ID):
                 SHOULD_LOGOUT_AND_EXIT = True
                 logger.info("[TG] 收到 logout 指令，标记退出")
-            return command, target_id, new_offset
-
+            _TG_BATCH.append((command, target_id))
         if skipped:
             logger.info(f"[TG] 忽略 {skipped} 条启动前发来的旧消息")
+        if _TG_BATCH:
+            cmd, target = _TG_BATCH.pop(0)
+            return cmd, target, new_offset
         return None, None, new_offset
     except requests.exceptions.RequestException as e:
-        _tg_net_fail("检查指令", e)
+        _tg_net_fail(None, f"{type(e).__name__}: {e}")
     except (KeyError, IndexError, ValueError) as e:
         logger.debug(f"[TG] 解析指令响应失败: {e}")
     return None, None, offset
@@ -519,6 +632,159 @@ def throttle_ok(key, seconds):
         return False
     _THROTTLE_TS[key] = now
     return True
+
+
+# ================= 🔄 心跳 / 可打断等待 / 出错定位 =================
+# v1.3.2：所有耗时等待都必须经过 tick()。这样在任何阶段（登录、搜索、选座、
+# 等待付款、休息）都能及时响应：停止指令、Web 面板截图、Telegram 指令。
+# 之前的"找不到元素就卡死、点停止要等好几分钟"就是因为等待期间完全不看外部状态。
+
+try:
+    SCREENSHOT_INTERVAL = float((CFG.get("bot_settings", {}) or {}).get("screenshot_interval", 5) or 0)
+except Exception:
+    SCREENSHOT_INTERVAL = 5.0
+
+_TG_QUEUE = []
+_TG_QUEUE_MAX = 10
+_TG_LAST_POLL = 0.0
+_TG_QUEUE_LOCK = threading.Lock()
+TG_OFFSET = {"value": None}
+_LAST_TICK = {"ts": time.time(), "phase": ""}
+
+
+def tick(page=None, phase=None, force_shot=False):
+    """轻量心跳：检查停止指令 / 发布截图 / 收取 Telegram 指令（只入队，不在流程中间执行）"""
+    try:
+        _LAST_TICK["ts"] = time.time()
+        if phase:
+            BOT_STATE["phase"] = phase
+            _LAST_TICK["phase"] = phase
+    except Exception:
+        pass
+    if SHOULD_LOGOUT_AND_EXIT:
+        return False
+    if check_remote_stop_command():
+        return False
+    if page is not None and SCREENSHOT_INTERVAL > 0:
+        try:
+            publish_screenshot(page, force=force_shot, interval=SCREENSHOT_INTERVAL,
+                               meta_extra={"phase": BOT_STATE.get("phase", ""),
+                                           "round": BOT_STATE.get("round", 0),
+                                           "pid": os.getpid(),
+                                           "telegram": "down" if _TG_NET["down"] else "ok"})
+        except Exception:
+            pass
+    poll_telegram_queue()
+    return True
+
+
+def poll_telegram_queue(force=False):
+    """把 Telegram 指令收进队列（不在流程中间直接执行，避免打断选座/付款）"""
+    global _TG_LAST_POLL
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    now = time.time()
+    if not force and now - _TG_LAST_POLL < 3:
+        return
+    _TG_LAST_POLL = now
+    try:
+        command, target_id, new_offset = check_telegram_command(offset=TG_OFFSET["value"])
+    except Exception as e:
+        logger.debug(f"[TG] 收取指令失败: {e}")
+        return
+    if new_offset:
+        TG_OFFSET["value"] = new_offset
+    if not command:
+        return
+    with _TG_QUEUE_LOCK:
+        if len(_TG_QUEUE) >= _TG_QUEUE_MAX:
+            _TG_QUEUE.pop(0)
+        _TG_QUEUE.append((command, target_id))
+    logger.info(f"[指令] 已排队: {command} ({target_id})")
+
+
+def next_telegram_command():
+    with _TG_QUEUE_LOCK:
+        return _TG_QUEUE.pop(0) if _TG_QUEUE else (None, None)
+
+
+def sleep_s(seconds, page=None, phase=None):
+    """可打断等待：响应停止指令 + 持续发布截图 + 收指令入队"""
+    deadline = time.time() + max(0.0, float(seconds))
+    while True:
+        if not tick(page, phase=phase):
+            return False
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return True
+        time.sleep(min(0.5, remaining))
+
+
+def wait_visible(page, selector, timeout=10, label=None):
+    """分片等待元素可见：等待期间依旧能响应停止/远程面板，不会整段卡死"""
+    deadline = time.time() + max(0.0, float(timeout))
+    try:
+        loc = page.locator(selector).first
+    except Exception:
+        return False
+    while True:
+        try:
+            if loc.count() and loc.is_visible():
+                return True
+        except Exception:
+            pass
+        if time.time() >= deadline:
+            return False
+        if not tick(page):
+            return False
+        time.sleep(0.3)
+
+
+def page_report(page):
+    """描述"现在在哪一页、页面长什么样"——出错定位用"""
+    url, title, ready, buttons = "?", "?", "?", []
+    try:
+        url = page.url
+    except Exception:
+        pass
+    try:
+        title = (page.title() or "")[:60]
+    except Exception:
+        pass
+    try:
+        ready = page.evaluate("document.readyState")
+    except Exception:
+        pass
+    try:
+        buttons = page.evaluate("""() => Array.from(document.querySelectorAll('button, input[type=submit], input[type=button], a.btn'))
+            .filter(e => e.offsetParent !== null)
+            .slice(0, 8)
+            .map(e => (e.id ? '#' + e.id : '') + '|' + String(e.innerText || e.value || '').trim().slice(0, 18))""")
+    except Exception:
+        pass
+    text = f"页面: {url} | 标题: {title} | readyState={ready}"
+    if buttons:
+        text += f" | 可见按钮: {buttons}"
+    return text
+
+
+def report_stuck(page, what, shot=True, notify=True):
+    """找不到元素/流程异常时：写清"在哪、缺什么、页面上有什么"，并发一张截图（去重）"""
+    detail = page_report(page)
+    logger.error(f"[定位失败] {what} :: {detail}")
+    if not notify or not throttle_ok(f"stuck:{str(what)[:40]}", 120):
+        return detail
+    if shot:
+        try:
+            img = page.screenshot(type='png', full_page=True, timeout=15000)
+            send_telegram_photo(f"⚠️ <b>{str(what)[:120]}</b>\n<code>{detail[:300]}</code>", img)
+            return detail
+        except Exception as e:
+            logger.debug(f"[定位失败] 截图也失败: {e}")
+    send_notification(f"⚠️ {what}\n{detail[:300]}")
+    return detail
+
+
 MAINTENANCE_KEYWORDS = (
     "maintenance", "penyelenggaraan", "down for", "under maintenance", "temporarily unavailable",
     "will be unavailable", "scheduled downtime", "system upgrade", "sedang diselenggara",
@@ -591,19 +857,23 @@ def handle_popup(page, capture=False):
                         pass
 
         # 4) 兜底：隐藏所有 bootstrap modal 与遮罩
+        #    v1.3.2：旧实现只在"元素带内联 display 样式"时才隐藏，Bootstrap 5 /
+        #    纯 CSS 类控制的可见弹窗根本盖不住 —— 弹窗挡住按钮就会一路"找不到元素"。
         page.evaluate("""() => {
+            const isVisible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
             document.querySelectorAll('.modal').forEach(m => {
-                if (m.id === 'seatSelect') return;  // 选座弹窗必须保留
-                if (m.style.display && m.style.display !== 'none') {
+                if (m.id === 'seatSelect' || m.closest('#seatSelect')) return;  // 选座弹窗必须保留
+                if (isVisible(m) || m.classList.contains('show')) {
                     m.style.display = 'none';
                     m.classList.remove('show');
                 }
             });
             document.querySelectorAll('.modal-backdrop').forEach(e => e.remove());
-            document.querySelectorAll('.fade.show').forEach(e => {
+            document.querySelectorAll('body > .fade.show').forEach(e => {
                 if (e.id !== 'seatSelect' && !e.closest('#seatSelect')) e.classList.remove('show');
             });
             document.body.classList.remove('modal-open');
+            document.body.style.overflow = '';
         }""")
     except Exception as e:
         logger.debug(f"[页面] 处理弹窗时出现异常（可忽略）: {e}")
@@ -737,14 +1007,31 @@ def cache_cookies(page):
 
 
 def is_logged_in(page):
-    """通过导航栏判断是否已登录（登录链接消失或出现登出链接即视为已登录）"""
+    """判断是否已登录
+
+    v1.3.2：旧实现是"看不到登录链接就算已登录"，于是页面白屏 / 502 / 还在加载时
+    也会返回 True，机器人接着在坏页面上点搜索，最后只报一句"找不到元素"。
+    现在要求页面确实是 KTMB 且内容正常，才允许走"没有登录链接 = 已登录"这条老规则。
+    """
     try:
+        url = (page.url or "").lower()
+        if "online.ktmb.com.my" not in url:
+            return False
+        if "/account/login" in url:
+            return False
         if page.locator("a[href*='/Account/Logout']").count():
             return True
         link = page.locator("a[href*='/Account/Login']")
-        if link.count() == 0:
-            return True
-        return not link.first.is_visible()
+        if link.count():
+            return not link.first.is_visible()
+        try:
+            if page.evaluate("document.readyState") == "loading":
+                return False
+            if not (page.locator("body").inner_text() or "").strip():
+                return False
+        except Exception:
+            return False
+        return True
     except Exception:
         return False
 
@@ -808,7 +1095,9 @@ def login(page, max_attempts=3):
                 if is_logged_in(page):
                     cache_cookies(page)
                     return True
-                time.sleep(1)
+                logger.warning(f"[登录] 没找到登录表单 (第 {attempt}/{max_attempts} 次) :: {page_report(page)}")
+                if not interruptible_sleep(1, page):
+                    return False
                 continue
             if check_remote_stop_command():
                 return False
@@ -819,9 +1108,9 @@ def login(page, max_attempts=3):
         except Exception as e:
             if SHOULD_LOGOUT_AND_EXIT:
                 return False
-            logger.warning(f"[登录] 提交表单异常，重试中: {e}")
+            logger.warning(f"[登录] 提交表单异常，重试中: {e} :: {page_report(page)}")
             handle_popup(page)
-            if not interruptible_sleep(2):
+            if not interruptible_sleep(2, page):
                 return False
             continue
 
@@ -846,7 +1135,7 @@ def login(page, max_attempts=3):
                 logger.info("[系统] 登录成功")
                 cache_cookies(page)
                 return True
-            if not interruptible_sleep(1):
+            if not interruptible_sleep(1, page):
                 return False
 
         if is_logged_in(page) and "Login" not in page.url:
@@ -857,7 +1146,7 @@ def login(page, max_attempts=3):
         if attempt < max_attempts:
             wait_s = 2 * attempt
             logger.warning(f"[登录] 第 {attempt} 次尝试未成功，{wait_s} 秒后重试")
-            if not interruptible_sleep(wait_s):
+            if not interruptible_sleep(wait_s, page):
                 return False
 
     logger.error(f"[系统] 登录失败（已重试 {max_attempts} 次）")
@@ -954,15 +1243,15 @@ def perform_search(page, config):
         page.locator("#btnSubmit").click()
     except Exception as e:
         logger.error(f"[搜索] 填表/提交失败: {e}")
-        send_snap(page, f"⚠️ <b>搜索失败</b>\n{str(e)[:200]}")
+        report_stuck(page, f"搜索填表失败: {str(e)[:150]}")
         return False
 
-    try:
-        page.wait_for_selector(".btn-seat-layout", timeout=15000)
-    except Exception:
+    if not wait_visible(page, ".btn-seat-layout", timeout=15, label="车次座位按钮"):
+        # 可能是被弹窗挡住了：清一次弹窗再等 5 秒
         handle_popup(page)
-        logger.info("[搜索] 没有可用车次")
-        return False
+        if not wait_visible(page, ".btn-seat-layout", timeout=5, label="车次座位按钮"):
+            logger.info(f"[搜索] 没有可用车次 :: {page_report(page)}")
+            return False
 
     handle_popup(page)
 
@@ -1117,10 +1406,8 @@ def select_seat(page, train_mode="auto"):
     """
     logger.info("[操作] 正在选座...")
     BOT_STATE["phase"] = "选座中"
-    try:
-        page.wait_for_selector("#seatSelect.show", state="visible", timeout=10000)
-    except Exception:
-        logger.warning("[选座] 座位选择界面未出现")
+    if not wait_visible(page, "#seatSelect", timeout=10, label="选座弹窗"):
+        report_stuck(page, "点开车次后选座弹窗没有出现")
         return False
     time.sleep(0.5)
     handle_popup(page)
@@ -1205,6 +1492,8 @@ def select_seat(page, train_mode="auto"):
                 ", ".join(f"{c['coach']}/{c['no']}({seat_label(c)},MYR{c.get('price', 0):.2f})" for c in chosen))
 
     for st in chosen:
+        if not tick(page):
+            return False
         try:
             coach_btn = page.locator(f"#seatSelect .coache-btn[data-CoacheId='{st['coachId']}']").first
             if coach_btn.count():
@@ -1227,7 +1516,7 @@ def select_seat(page, train_mode="auto"):
         pass
     if "disabled-btn" in cls:
         logger.warning(f"[选座] 确认按钮未启用（已选 {len(chosen)}/{pax} 个座位）")
-        send_snap(page, "⚠️ 选座确认按钮未启用")
+        report_stuck(page, f"选座确认按钮未启用（已选 {len(chosen)}/{pax} 个座位）")
         return False
 
     try:
@@ -1236,19 +1525,26 @@ def select_seat(page, train_mode="auto"):
         logger.warning(f"[选座] 点击确认按钮失败: {e}")
         return False
 
+    booked = False
     try:
         page.wait_for_function(
             "() => { const b = document.getElementById('bookingData'); return b && b.value && b.value.length > 0; }",
             timeout=15000,
         )
+        booked = True
     except Exception:
         logger.warning("[选座] 等待订座结果超时")
     handle_popup(page)
 
-    try:
-        page.wait_for_selector(".btn-passenger", state="visible", timeout=6000)
-    except Exception:
-        logger.warning("[选座] 订座后未出现乘客信息按钮（可能订座未生效）")
+    if wait_visible(page, ".btn-passenger", timeout=8, label="乘客信息按钮"):
+        booked = True
+    else:
+        logger.warning("[选座] 订座后未出现乘客信息按钮（订座可能没生效）")
+
+    if not booked:
+        report_stuck(page, "选座确认后既没有拿到订座数据，也没出现乘客信息按钮")
+        close_seat_modal(page)
+        return False
     logger.info("[选座] 选座成功！")
     return True
 
@@ -1342,6 +1638,8 @@ def acquire_gateway_page(context, page, before_ids, timeout=300):
 
     KTMB 使用 window.open 打开网关；在无头/慢速环境下，新标签页可能几十秒后才
     被 Playwright 感知，因此这里同时轮询「新标签页」和「任意页面出现网关付款按钮」。
+
+    v1.3.2：等待期间照常跑心跳（原来这里会闷头等最多 5 分钟，面板点停止要等到超时才生效）。
     """
     combined = ", ".join(GATEWAY_PAY_SELECTORS)
     deadline = time.time() + timeout
@@ -1367,7 +1665,8 @@ def acquire_gateway_page(context, page, before_ids, timeout=300):
         if time.time() - last_report >= 30:
             logger.info(f"[支付] 仍在等待支付网关页面... ({int(time.time() - (deadline - timeout))}s)")
             last_report = time.time()
-        time.sleep(1)
+        if not sleep_s(1, page):
+            return page
 
     logger.warning("[支付] 等待支付网关页面超时")
     return page
@@ -1387,8 +1686,7 @@ def go_to_payment_gateway(page, context, button_selectors, label, timeout=25):
         except Exception as e:
             logger.debug(f"[支付] 点击 {sel} 失败: {e}")
     if not clicked:
-        send_snap(page, f"⚠️ 找不到 {label} 按钮，当前页面：")
-        send_notification(f"📍 URL: {page.url}")
+        report_stuck(page, f"付款页找不到 {label} 按钮")
         return None
 
     proceed = None
@@ -1396,7 +1694,18 @@ def go_to_payment_gateway(page, context, button_selectors, label, timeout=25):
                 "input[value*='HERE']", "input[type='submit']", "button[type='submit']"):
         loc = page.locator(sel).first
         try:
-            loc.wait_for(state="visible", timeout=timeout * 1000)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    if loc.count() and loc.is_visible():
+                        break
+                except Exception:
+                    pass
+                if not tick(page):
+                    return page
+                time.sleep(0.3)
+            else:
+                continue
             proceed = loc
             logger.info(f"[支付] 找到网关跳转按钮 ({sel})")
             break
@@ -1410,12 +1719,16 @@ def go_to_payment_gateway(page, context, button_selectors, label, timeout=25):
         except Exception as e:
             logger.warning(f"[支付] 点击网关跳转按钮失败: {str(e)[:120]}")
     else:
-        logger.warning("[支付] 未出现网关跳转按钮，检查当前页面状态")
+        logger.warning(f"[支付] 未出现网关跳转按钮，检查当前页面状态 :: {page_report(page)}")
     return page
 
 
 def click_gateway_pay(context, gateway_page, before_ids=None, max_attempts=3, first_timeout=120000):
-    """在支付网关页面点击 PAY，直到页面进入下一步（二维码/跳转）"""
+    """在支付网关页面点击 PAY，直到页面进入下一步（二维码/跳转）
+
+    v1.3.2：等待按钮的部分改成"分片轮询"，等待期间仍然响应停止指令，
+    并且找不到按钮时会把当前页面信息写进日志（原来只是默默等 120 秒然后 break）。
+    """
     if before_ids is None:
         before_ids = set()
     combined = ", ".join(GATEWAY_PAY_SELECTORS)
@@ -1430,21 +1743,39 @@ def click_gateway_pay(context, gateway_page, before_ids=None, max_attempts=3, fi
             except Exception:
                 pass
 
-        timeout = first_timeout if attempt == 1 else 20000
+        wait_ms = first_timeout if attempt == 1 else 20000
+        btn = gateway_page.locator(combined).first
+        deadline = time.time() + wait_ms / 1000.0
+        found = False
+        while time.time() < deadline:
+            try:
+                if btn.count() and btn.is_visible():
+                    found = True
+                    break
+            except Exception:
+                pass
+            if not tick(gateway_page):
+                return gateway_page
+            time.sleep(0.5)
+
+        if not found:
+            logger.warning("[支付] 未找到网关付款按钮（等待超时）")
+            report_stuck(gateway_page, "支付网关页找不到付款按钮")
+            break
+
         try:
-            btn = gateway_page.locator(combined).first
-            btn.wait_for(state="visible", timeout=timeout)
             btn.click(timeout=10000)
             logger.info("[支付] 已点击网关付款按钮")
         except Exception as e:
-            logger.warning(f"[支付] 未找到/无法点击网关付款按钮: {str(e)[:100]}")
+            logger.warning(f"[支付] 点击网关付款按钮失败: {str(e)[:100]}")
+            report_stuck(gateway_page, "支付网关付款按钮点不动")
             break
 
         try:
             gateway_page.wait_for_load_state("domcontentloaded", timeout=20000)
         except Exception:
             pass
-        time.sleep(6)
+        sleep_s(6, gateway_page)
 
         still_pay_button = False
         try:
@@ -1457,7 +1788,7 @@ def click_gateway_pay(context, gateway_page, before_ids=None, max_attempts=3, fi
             logger.info("[支付] 网关页面已进入下一步")
             break
         logger.info(f"[支付] 网关页面仍显示付款按钮，重试 ({attempt}/{max_attempts})")
-        time.sleep(3)
+        sleep_s(3, gateway_page)
 
     new_page = last_new_page(context, before_ids) if before_ids else None
     if new_page is not None and new_page is not gateway_page:
@@ -1484,6 +1815,12 @@ def enlarge_and_shot(page, caption):
         logger.warning(f"[支付] 截图失败: {e}")
         send_notification(f"{caption}\n(截图失败: {e})\n📍 URL: {page.url}")
         return False
+    finally:
+        # v1.3.2：以前截图后视口一直停在 1920x2500，后面所有操作/心跳都在超长视口里跑
+        try:
+            page.set_viewport_size({"width": 1920, "height": 1080})
+        except Exception:
+            pass
 
 
 def execute_payment_command(page, context, command, target_id):
@@ -1541,7 +1878,7 @@ def execute_payment_command(page, context, command, target_id):
             send_notification("💳 尝试 KTM Wallet...")
             if not click_first(page, ["#btnKtmbEWallet", "button:has-text('Wallet')"], timeout=8000, label="KTM Wallet"):
                 return False
-            time.sleep(3)
+            sleep_s(3, page)
             popup_msg = handle_popup(page, capture=True)
             text = (popup_msg or "")
             try:
@@ -1589,12 +1926,10 @@ def check_remote_stop_command():
     return False
 
 
-def interruptible_sleep(seconds):
-    """可被打断的等待：响应退出信号，也响应 Web 面板的停止指令"""
+def interruptible_sleep(seconds, page=None):
+    """可被打断的等待：响应退出信号、Web 面板停止指令、远程截图请求与 TG 指令"""
     for _ in range(int(seconds)):
-        if SHOULD_LOGOUT_AND_EXIT:
-            return False
-        if check_remote_stop_command():
+        if not tick(page):
             return False
         time.sleep(1)
     return not SHOULD_LOGOUT_AND_EXIT
@@ -1608,7 +1943,11 @@ def handle_remote_control(page):
     """
     global SHOULD_LOGOUT_AND_EXIT
     try:
-        save_screenshot(page)
+        if SCREENSHOT_INTERVAL > 0:
+            tick(page)
+        else:
+            publish_screenshot(page, force=True, interval=0,
+                               meta_extra={"phase": BOT_STATE.get("phase", "")})
         remote_cmd = get_command()
         if not remote_cmd:
             return
@@ -1616,10 +1955,17 @@ def handle_remote_control(page):
         if action in ('logout', 'stop', 'shutdown'):
             SHOULD_LOGOUT_AND_EXIT = True
             logger.info("[远程控制] 收到停止指令，准备安全登出")
+            send_result(remote_cmd.get('id'), 'success', '收到停止指令，正在安全登出')
             return
         logger.info(f"[远程控制] 收到命令: {action}")
         result = execute_remote_command(page, remote_cmd)
         logger.info(f"[远程控制] 执行结果: {result}")
+        send_result(remote_cmd.get('id'), result.get('status'), result.get('message'))
+        try:
+            publish_screenshot(page, force=True, interval=0,
+                               meta_extra={"phase": BOT_STATE.get("phase", "")})
+        except Exception:
+            pass
     except Exception as e:
         logger.warning(f"[远程控制] 处理失败: {e}")
 
@@ -1634,8 +1980,17 @@ def send_snap(page, caption="📸 <b>长官，这是现在的监控画面</b>"):
 
 
 def wait_for_payment_command(page, context):
-    """等待 Telegram 支付指令（待命模式，最多 20 分钟）"""
+    """等待 Telegram 支付指令（待命模式，最多 20 分钟）
+
+    返回: "SUCCESS"(已付款) / "MANUAL"(交人工) / False(取消、超时或退出)
+
+    v1.3.2：
+      * 每秒都在跑心跳 → 面板截图/停止/远程点击都即时生效；
+      * Telegram 指令走队列，不会因为在等长轮询而漏掉；
+      * /manual 不再让程序退出（以前会直接登出并关掉浏览器，人工根本没法接着付）。
+    """
     logger.info("[系统] 进入待命模式，等待支付指令...")
+    BOT_STATE["phase"] = "抢到票，等待付款指令"
     ticket_info = extract_ticket_info(page)
     msg = (
         f"🚨 <b>{BOT_NAME} 抢票成功！</b> 🚨\n\n{ticket_info}\n\n"
@@ -1645,81 +2000,142 @@ def wait_for_payment_command(page, context):
 
     # 关键：进入待命前先丢弃积压的旧消息（否则很久以前发的 /manual 会被当成新指令执行）
     last_offset = prime_telegram_offset()
+    if last_offset:
+        TG_OFFSET["value"] = last_offset
+
     deadline = time.time() + 20 * 60
     while time.time() < deadline:
         if SHOULD_LOGOUT_AND_EXIT:
             return False
-        handle_remote_control(page)
 
-        command, target_id, new_offset = check_telegram_command(offset=last_offset, long_poll=True)
-        if command:
-            last_offset = new_offset
-            if process_telegram_command(page, command, target_id):
-                pass
-            elif command == "/logout" and (target_id == "all" or target_id == BOT_ID):
+        handle_remote_control(page)
+        if SHOULD_LOGOUT_AND_EXIT:
+            return False
+
+        poll_telegram_queue(force=True)
+        command, target_id = next_telegram_command()
+        if not command:
+            if not sleep_s(2, page):
                 return False
-            elif command in ("/cancel", "/abort") and (target_id == "all" or target_id == BOT_ID):
-                logger.info("[指令] 收到取消指令")
-                return False
-            elif execute_payment_command(page, context, command, target_id):
-                logger.info("[系统] 流程结束。")
-                return True
-            elif target_id == "all" or target_id == BOT_ID:
-                send_notification("🤖 仍在待命...")
+            continue
+
+        logger.info(f"[指令] 收到 {command} ({target_id})")
+        if process_telegram_command(page, command, target_id):
+            continue
+        if command == "/logout" and target_id in ("all", BOT_ID):
+            return False
+        if command in ("/cancel", "/abort") and target_id in ("all", BOT_ID):
+            logger.info("[指令] 收到取消指令，结束待命")
+            send_notification("🛑 已取消付款待命，机器人继续监控。")
+            return False
+        if command == "/manual" and target_id in ("all", BOT_ID):
+            execute_payment_command(page, context, "/manual", target_id)
+            return "MANUAL"
+        if execute_payment_command(page, context, command, target_id):
+            return "SUCCESS"
+        if target_id in ("all", BOT_ID):
+            send_notification(f"🤖 仍在待命...（{command} 已处理）")
+
         try:
             if not page.url.startswith("https"):
                 break
         except Exception:
             break
-        # 长轮询本身就在等消息，这里只做一点点节流（网络不通时避免空转）
-        if not command:
-            time.sleep(0.5)
+
+    if not SHOULD_LOGOUT_AND_EXIT:
+        logger.warning("[系统] 20 分钟内没有收到付款指令，退出待命")
+        send_notification("⏰ 20 分钟没收到付款指令，已退出待命（订单未付款）。")
+    return False
+
+
+def manual_hold(page):
+    """人工接管模式：机器人不再碰页面，浏览器保持打开
+
+    返回 True = 用户取消，继续下一轮监控；False = 应该退出程序（/logout 或面板停止）
+    """
+    BOT_STATE["phase"] = "人工接管"
+    logger.info("[人工] 已交接，浏览器保持打开；发 /logout 结束，发 /cancel 恢复自动监控")
+    send_notification("🧑‍✈️ <b>人工接管中</b>\n机器人不会再操作页面，浏览器保持打开。\n"
+                      "/snap 看画面 · /cancel 恢复自动监控 · /logout 退出并登出")
+    while True:
         if SHOULD_LOGOUT_AND_EXIT:
             return False
-    return True
+        handle_remote_control(page)
+        if SHOULD_LOGOUT_AND_EXIT:
+            return False
+        poll_telegram_queue()
+        command, target_id = next_telegram_command()
+        if command:
+            logger.info(f"[指令] 收到 {command} ({target_id})")
+            if command == "/logout" and target_id in ("all", BOT_ID):
+                return False
+            if command in ("/cancel", "/abort") and target_id in ("all", BOT_ID):
+                send_notification("🛑 已退出手动模式，机器人继续自动监控。")
+                return True
+            if not process_telegram_command(page, command, target_id):
+                send_notification("🧑‍✈️ 人工接管中：目前只响应 /snap /status /page /cancel /logout")
+        time.sleep(0.5)
 
 
 def process_automated_payment(page, context, method):
-    """处理自动支付流程"""
+    """处理自动支付流程
+
+    返回: "SUCCESS"(已付款) / "MANUAL"(交给人工，浏览器继续开着) / False
+    """
     if method == "Manual":
-        send_notification("🛑 请手动付款！")
-        interruptible_sleep(1800)
-        return True
+        send_notification("🛑 请手动付款！机器人不会再操作页面。")
+        return "MANUAL"
     if method == "KTM Wallet":
-        return execute_payment_command(page, context, "/wallet", "all")
+        return "SUCCESS" if execute_payment_command(page, context, "/wallet", "all") else False
     if method == "DuitNow":
         execute_payment_command(page, context, "/duitnow", "all")
-        interruptible_sleep(1800)
-        return True
+        send_notification("📱 DuitNow 二维码已生成，请扫码付款。")
+        return "MANUAL"
     logger.warning(f"[支付] 未知支付方式: {method}")
     return False
 
 
-def click_first(page, selectors, timeout=5000, required=True, label=""):
-    """依次尝试多个选择器，点击第一个可见元素（先快速扫描，再统一等待）"""
-    for sel in selectors:
-        try:
-            loc = page.locator(sel).first
-            if loc.count() and loc.is_visible():
-                loc.click(timeout=3000)
-                logger.debug(f"[点击] {label or sel} -> {sel}")
-                return True
-        except Exception:
-            continue
+def click_first(page, selectors, timeout=5000, required=True, label="", retries=None):
+    """依次尝试多个选择器，点击第一个可见元素（先快速扫描，再统一等待）
 
-    if timeout > 0:
-        combined = ", ".join(selectors)
-        try:
-            loc = page.locator(combined).first
-            loc.wait_for(state="visible", timeout=timeout)
-            loc.click(timeout=5000)
-            logger.debug(f"[点击] {label or combined} -> {combined}")
-            return True
-        except Exception:
-            pass
+    v1.3.2：找不到元素时会重试，并把"当前页面 / 可见按钮"写进日志（之前只丢一句
+    warning 就继续往下走，表现就是"卡住又没有错误信息"）。
+    """
+    if isinstance(selectors, str):
+        selectors = [selectors]
+    if retries is None:
+        retries = 2 if required else 1
+
+    for attempt in range(1, retries + 1):
+        if not tick(page):
+            return False
+        for sel in selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() and loc.is_visible():
+                    loc.click(timeout=3000)
+                    logger.debug(f"[点击] {label or sel} -> {sel}")
+                    return True
+            except Exception:
+                continue
+
+        if timeout > 0:
+            combined = ", ".join(selectors)
+            try:
+                loc = page.locator(combined).first
+                loc.wait_for(state="visible", timeout=min(timeout, 6000))
+                loc.click(timeout=5000)
+                logger.debug(f"[点击] {label or combined} -> {combined}")
+                return True
+            except Exception:
+                pass
+        if attempt < retries:
+            sleep_s(1, page)
 
     if required:
-        logger.warning(f"[点击] 找不到可点击元素: {label or selectors}")
+        report_stuck(page, f"找不到可点击元素: {label or selectors}")
+    else:
+        logger.debug(f"[点击] 未找到（可忽略）: {label or selectors}")
     return False
 
 
@@ -1729,7 +2145,7 @@ def cancel_booking(page):
         btn = page.locator(".btn-reset").first
         if btn.count() and btn.is_visible():
             btn.click()
-            time.sleep(2)
+            sleep_s(2, page)
             handle_popup(page)
             logger.info("[订座] 已取消未完成的订座")
             return True
@@ -1763,8 +2179,12 @@ def advance_to_payment_page(page, max_steps=8):
     """从乘客页一路点到付款方式选择页
 
     流程: 确认乘客 -> (Takaful 弹窗) -> PROCEED TO PAYMENT -> (餐食确认弹窗) -> 付款页
+    每一步之间都会跑心跳，所以随时可以停止/远程接管。
     """
     for step in range(max_steps):
+        if not tick(page):
+            return False
+
         ready = payment_page_ready(page)
         if ready:
             logger.info(f"[填表] 已到达付款页 (检测到 {ready})")
@@ -1781,48 +2201,53 @@ def advance_to_payment_page(page, max_steps=8):
                 logger.info(f"[填表] 弹窗: {msg.strip()[:80]}")
                 if "takaful" in msg.lower():
                     if click_first(page, ["#popupModalOkButton"], timeout=4000, required=False, label="不购买保险"):
-                        time.sleep(1)
+                        sleep_s(1, page)
                         continue
                 if click_first(page, ["#popupModalOkButton"], timeout=3000, required=False, label="确认弹窗"):
-                    time.sleep(1)
+                    sleep_s(1, page)
                     continue
         except Exception as e:
             logger.debug(f"[填表] 处理弹窗异常: {e}")
 
         # 餐食/条款确认弹窗
         if click_first(page, ["#confirmationConfirmButton"], timeout=2000, required=False, label="确认继续付款"):
-            time.sleep(1)
+            sleep_s(1, page)
             continue
 
         # 放弃保险按钮
         if click_first(page, ["#btnUpdateInsuranceNo"], timeout=2000, required=False, label="放弃保险"):
-            time.sleep(1)
+            sleep_s(1, page)
             continue
 
         # 继续付款按钮
         if click_first(page, ["#btnProceedToPayment"], timeout=2000, required=False, label="继续付款"):
-            time.sleep(1)
+            sleep_s(1, page)
             continue
 
-        time.sleep(1)
+        sleep_s(1, page)
 
-    return bool(payment_page_ready(page))
+    if payment_page_ready(page):
+        return True
+    report_stuck(page, f"点了 {max_steps} 步都没能到达付款方式选择页")
+    return False
 
 
 def handle_passenger_and_payment(page, context, train_mode="auto"):
-    """填写乘客信息并处理支付（完全按页面元素自适应，新旧火车同一套流程）"""
+    """填写乘客信息并处理支付（完全按页面元素自适应，新旧火车同一套流程）
+
+    返回: "SUCCESS"(已付款) / "MANUAL"(交人工接管) / False(中断或失败)
+    """
     try:
         # 1) 进入乘客信息页
         if not click_first(page, [".btn-passenger"], timeout=10000, label="乘客信息按钮"):
             logger.error("[填表] 找不到 .btn-passenger 按钮")
-            send_snap(page, "⚠️ 找不到乘客信息按钮，当前页面：")
             return False
-        page.wait_for_load_state("domcontentloaded", timeout=15000)
         try:
-            page.wait_for_selector("#btnConfirmPayment", state="visible", timeout=15000)
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
         except Exception:
-            logger.warning("[填表] 乘客页确认按钮未出现")
-        time.sleep(1)
+            pass
+        wait_visible(page, "#btnConfirmPayment", timeout=15, label="乘客页确认按钮")
+        sleep_s(1, page)
         handle_popup(page)
 
         # 2) 勾选本人 + 票种
@@ -1835,7 +2260,7 @@ def handle_passenger_and_payment(page, context, train_mode="auto"):
                     break
             except Exception as e:
                 logger.debug(f"[填表] 勾选 {sel} 失败: {e}")
-        time.sleep(1)
+        sleep_s(1, page)
 
         try:
             ttype = page.locator("select.TicketTypeId, select[id*='TicketTypeId']").first
@@ -1850,24 +2275,24 @@ def handle_passenger_and_payment(page, context, train_mode="auto"):
 
         # 3) 确认乘客
         if not click_first(page, ["#btnConfirmPayment"], timeout=10000, label="确认乘客"):
-            send_snap(page, "⚠️ 找不到确认乘客按钮")
             return False
-        time.sleep(2)
+        sleep_s(2, page)
 
         # 4) 一路推进到付款页（新旧车型流程不同，统一用状态驱动）
         if not advance_to_payment_page(page):
             logger.error("[填表] 未能到达付款方式选择页")
-            send_snap(page, "⚠️ <b>未能到达付款页面</b>")
             cancel_booking(page)
             return False
 
         logger.info(f"[填表] 当前页面: {page.url}")
+        BOT_STATE["phase"] = "已到付款页"
         if PAYMENT_METHOD == "Command":
             return wait_for_payment_command(page, context)
-        return process_automated_payment(page, context, PAYMENT_METHOD)
+        outcome = process_automated_payment(page, context, PAYMENT_METHOD)
+        return outcome if outcome in ("SUCCESS", "MANUAL") else False
     except Exception as e:
         logger.error(f"[异常] 填表流程出错: {e}", exc_info=True)
-        send_snap(page, f"⚠️ <b>填表流程出错</b>\n{str(e)[:200]}")
+        report_stuck(page, f"填表流程出错: {str(e)[:150]}")
         cancel_booking(page)
         return False
 
@@ -1887,6 +2312,8 @@ def run(playwright: Playwright) -> None:
 
     # 开机立刻清空历史 Telegram 指令，防止一开机就执行以前的 /logout 导致自杀
     tg_offset = flush_telegram_updates()
+    TG_OFFSET["value"] = tg_offset
+    _LAST_TICK["ts"] = time.time()
 
     browser = None
     context = None
@@ -1955,8 +2382,10 @@ def run(playwright: Playwright) -> None:
             return
 
     try:
-        page.set_default_timeout(30000)
-        page.set_default_navigation_timeout(60000)
+        # 默认超时不要设太长：元素找不到时宁可早点失败、重试、报错，
+        # 也不要每个动作都干等 30 秒（用户感受就是"卡死"）
+        page.set_default_timeout(20000)
+        page.set_default_navigation_timeout(45000)
     except Exception:
         pass
 
@@ -2014,6 +2443,19 @@ def run(playwright: Playwright) -> None:
     signal.signal(signal.SIGINT, _on_stop_signal)
     logger.info("[系统] 已注册安全退出信号处理器")
 
+    # 看门狗：心跳长时间不动 = 卡在某个 Playwright 调用里，至少把现场写进日志
+    def _watchdog():
+        last_warn = 0.0
+        while not SHOULD_LOGOUT_AND_EXIT:
+            time.sleep(10)
+            idle = time.time() - _LAST_TICK["ts"]
+            if idle > 120 and time.time() - last_warn > 120:
+                last_warn = time.time()
+                logger.warning(f"[看门狗] 已 {int(idle)} 秒没有心跳（阶段: {BOT_STATE.get('phase')}，"
+                               f"计划: {BOT_STATE.get('plan') or '-'}）；若一直没有新日志，"
+                               "请在面板点停止，或把 bot.log 最后 50 行发出来定位")
+    threading.Thread(target=_watchdog, daemon=True).start()
+
     try:
         total_loop = 0
         while True:
@@ -2062,10 +2504,8 @@ def run(playwright: Playwright) -> None:
                         break
                     if login_result == "MULTI_LOGIN":
                         logger.warning("[系统] 账号被锁定（多处登录），等待 5 分钟后重试...")
-                        for _ in range(300):
-                            if SHOULD_LOGOUT_AND_EXIT:
-                                break
-                            time.sleep(1)
+                        # 期间照样跑心跳：面板仍能看到画面，也能随时停止
+                        sleep_s(300, page)
                         break
                     if not login_result:
                         logger.error("[系统] 登录失败，本轮跳过该任务")
@@ -2083,11 +2523,18 @@ def run(playwright: Playwright) -> None:
                         BOT_STATE["phase"] = "选座中"
                         if select_seat(page, train_mode):
                             BOT_STATE["phase"] = "填写乘客/付款"
-                            if handle_passenger_and_payment(page, context, train_mode):
-                                logger.info("[完成] 任务成功退出。")
+                            outcome = handle_passenger_and_payment(page, context, train_mode)
+                            if outcome == "SUCCESS":
+                                logger.info("[完成] 付款完成，任务成功退出。")
+                                BOT_STATE["last_result"] = "已付款，任务完成"
                                 return
+                            if outcome == "MANUAL":
+                                BOT_STATE["last_result"] = "人工接管中"
+                                if not manual_hold(page):
+                                    return
+                                logger.info("[人工] 已退出手动模式，继续自动监控。")
                             else:
-                                logger.warning("[中断] 付款中断...")
+                                logger.warning("[中断] 付款中断，继续下一轮监控...")
                                 BOT_STATE["last_result"] = "付款流程中断"
                         else:
                             BOT_STATE["last_result"] = "座位被抢空 / 无符合偏好的座位"
@@ -2096,14 +2543,24 @@ def run(playwright: Playwright) -> None:
                         BOT_STATE["last_result"] = f"未找到 {config.get('time')} 的车次"
                 except Exception as e:
                     logger.error(f"[致命异常] 流程崩溃: {e}", exc_info=True)
+                    detail = ""
                     try:
-                        error_shot = page.screenshot(type='png', full_page=True)
+                        detail = page_report(page)
+                        logger.error(f"[致命异常] 现场 :: {detail}")
+                    except Exception:
+                        pass
+                    shot_ok = False
+                    try:
+                        error_shot = page.screenshot(type='png', full_page=True, timeout=15000)
                         send_telegram_photo(
-                            f"⚠️ <b>报告！遇到卡死报错</b>\n错误详情: <code>{str(e)[:150]}...</code>",
+                            f"⚠️ <b>报告！流程崩溃</b>\n<code>{str(e)[:150]}</code>\n{detail[:250]}",
                             error_shot
                         )
+                        shot_ok = True
                     except Exception as screenshot_err:
                         logger.warning(f"[异常] 错误截图也失败了: {screenshot_err}")
+                    if not shot_ok:
+                        send_notification(f"⚠️ 流程崩溃: {str(e)[:150]}\n{detail[:250]}")
 
             if SHOULD_LOGOUT_AND_EXIT:
                 break
@@ -2114,22 +2571,20 @@ def run(playwright: Playwright) -> None:
                 if SHOULD_LOGOUT_AND_EXIT:
                     break
 
-                # 远程控制: 每秒都检查（含面板停止指令）
+                BOT_STATE["next_refresh_in"] = i
+                # 远程控制 + 心跳：每秒都跑（面板停止指令 / 截图发布 / TG 指令入队）
                 handle_remote_control(page)
                 if SHOULD_LOGOUT_AND_EXIT:
                     break
 
+                command, target_id = next_telegram_command()
+                if command:
+                    logger.info(f"[指令] 收到 {command} ({target_id})")
+                    process_telegram_command(page, command, target_id)
+
                 if i % 10 == 0 or i <= 5:
                     sys.stdout.write(f"    剩余 {i} 秒...\r")
                     sys.stdout.flush()
-
-                BOT_STATE["next_refresh_in"] = i
-                if i % 3 == 0:
-                    command, target_id, new_offset = check_telegram_command(offset=tg_offset)
-                    if command:
-                        tg_offset = new_offset
-                        logger.info(f"[指令] 收到 {command} ({target_id})")
-                        process_telegram_command(page, command, target_id)
 
                 time.sleep(1)
             logger.info("")

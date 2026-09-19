@@ -75,8 +75,14 @@ body{background:var(--ink);color:var(--enamel);font-family:var(--f-body);min-hei
         
         <div class="controls">
             <div class="control-group">
+                <h3>📡 连接状态</h3>
+                <div class="log" id="meta" style="height:auto;min-height:78px;line-height:1.9">等待机器人画面...</div>
+                <button class="btn btn-secondary" style="margin-top:8px" onclick="refreshScreenshot(true)">🔄 立即刷新画面</button>
+            </div>
+
+            <div class="control-group">
                 <h3>🖱️ 点击操作</h3>
-                <p style="font-size:0.8em;color:#888;margin-bottom:8px;">点击左侧图片上的位置</p>
+                <p style="font-size:0.8em;color:#888;margin-bottom:8px;">先点图片上的位置（坐标会填下面），再点「点击该位置」</p>
                 <div style="display:flex;gap:5px;">
                     <input type="number" id="clickX" placeholder="X" style="width:50%;">
                     <input type="number" id="clickY" placeholder="Y" style="width:50%;">
@@ -127,9 +133,15 @@ body{background:var(--ink);color:var(--enamel);font-family:var(--f-body);min-hei
         const loading = document.getElementById('loading');
         const status = document.getElementById('status');
         const logDiv = document.getElementById('log');
+        const metaDiv = document.getElementById('meta');
         const coordDisplay = document.getElementById('coordDisplay');
         let imgNaturalW = 0, imgNaturalH = 0;
-        
+        let lastObjectUrl = null;
+        let shotAt = 0;          // 本机时间戳：这帧画面是什么时候拍的
+        let failStreak = 0;
+        let botRunning = null;
+        let phaseText = '';
+
         function log(msg, type='info') {
             const entry = document.createElement('div');
             entry.className = 'log-entry ' + type;
@@ -137,7 +149,22 @@ body{background:var(--ink);color:var(--enamel);font-family:var(--f-body);min-hei
             logDiv.prepend(entry);
             if (logDiv.children.length > 50) logDiv.lastChild.remove();
         }
-        
+
+        function setStatus(text, cls) {
+            status.textContent = text;
+            status.className = 'status ' + cls;
+        }
+
+        function renderMeta() {
+            const age = shotAt ? Math.max(0, Math.round((Date.now() - shotAt) / 1000)) : null;
+            const lines = [];
+            if (age === null) lines.push('画面: 暂无');
+            else lines.push('画面: ' + age + ' 秒前' + (age > 30 ? ' ⚠️ 可能已卡住' : ''));
+            lines.push('机器人: ' + (botRunning === true ? '运行中' : (botRunning === false ? '未运行' : '未知')));
+            if (phaseText) lines.push('阶段: ' + phaseText);
+            metaDiv.innerHTML = lines.map(function (l) { return '<div>' + l + '</div>'; }).join('');
+        }
+
         async function apiCall(endpoint, data={}) {
             try {
                 const resp = await fetch('/api/remote/' + endpoint, {
@@ -145,63 +172,100 @@ body{background:var(--ink);color:var(--enamel);font-family:var(--f-body);min-hei
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(data)
                 });
-                const result = await resp.json();
-                if (result.status === 'error') {
-                    log('❌ ' + result.message, 'error');
+                let result = {};
+                try { result = await resp.json(); } catch (e) { result = {status: 'error', message: 'HTTP ' + resp.status}; }
+                if (resp.status === 401) {
+                    log('会话已过期，请重新登录面板', 'error');
+                    setTimeout(function () { location.href = '/login'; }, 1500);
+                    return {status: 'error', message: '未登录'};
                 }
+                if (result.status === 'error') log('❌ ' + (result.message || '失败'), 'error');
                 return result;
             } catch (e) {
                 log('❌ 请求失败: ' + e.message, 'error');
                 return {status: 'error', message: e.message};
             }
         }
-        
-        async function refreshScreenshot() {
+
+        async function refreshScreenshot(force) {
             try {
-                const resp = await fetch('/api/remote/screenshot?' + Date.now());
+                if (force) { await fetch('/api/remote/request', {method: 'POST'}); }
+                const resp = await fetch('/api/remote/screenshot?t=' + Date.now());
                 if (resp.ok) {
                     const blob = await resp.blob();
-                    img.src = URL.createObjectURL(blob);
+                    if (lastObjectUrl) URL.revokeObjectURL(lastObjectUrl);
+                    lastObjectUrl = URL.createObjectURL(blob);
+                    img.src = lastObjectUrl;
                     loading.style.display = 'none';
-                    status.textContent = '已连接';
-                    status.className = 'status connected';
+                    failStreak = 0;
+                    const age = parseFloat(resp.headers.get('X-Screenshot-Age'));
+                    shotAt = Date.now() - (isNaN(age) ? 0 : age * 1000);
+                    botRunning = resp.headers.get('X-Bot-Running') === '1';
+                    setStatus('已连接', 'connected');
+                    renderMeta();
+                } else {
+                    failStreak++;
+                    let msg = '还没拿到画面...';
+                    try {
+                        const j = await resp.json();
+                        if (j && j.message) msg = j.message;
+                        if (j && typeof j.bot_running === 'boolean') botRunning = j.bot_running;
+                    } catch (e) {}
+                    if (failStreak >= 3) {
+                        setStatus('未连接', 'error');
+                        loading.textContent = msg;
+                        loading.style.display = 'block';
+                        if (failStreak === 3) log('❌ ' + msg, 'error');
+                    } else {
+                        setStatus('连接中...', 'connecting');
+                    }
+                    renderMeta();
                 }
             } catch (e) {
-                log('截图刷新失败: ' + e.message, 'error');
+                failStreak++;
+                setStatus('连接异常', 'error');
+                if (failStreak === 3) log('截图刷新失败: ' + e.message, 'error');
             }
         }
-        
+
+        async function refreshState() {
+            try {
+                const resp = await fetch('/api/remote/state');
+                if (!resp.ok) return;
+                const st = await resp.json();
+                botRunning = !!st.bot_running;
+                phaseText = st.phase || '';
+                if (typeof st.age === 'number') shotAt = Date.now() - st.age * 1000;
+                renderMeta();
+            } catch (e) { /* 忽略 */ }
+        }
+
         async function doClick() {
             const x = parseInt(document.getElementById('clickX').value);
             const y = parseInt(document.getElementById('clickY').value);
-            if (isNaN(x) || isNaN(y)) {
-                log('请输入有效的坐标', 'error');
-                return;
-            }
+            if (isNaN(x) || isNaN(y)) { log('请输入有效的坐标', 'error'); return; }
             log(`点击 (${x}, ${y})...`);
             const result = await apiCall('click', {x, y});
             if (result.status === 'success') {
-                log('✅ 点击成功', 'success');
-                setTimeout(refreshScreenshot, 500);
+                log('✅ ' + (result.message || '点击成功'), 'success');
+                setTimeout(function () { refreshScreenshot(true); }, 600);
             }
         }
-        
+
         async function doType() {
             const text = document.getElementById('typeText').value;
             if (!text) return;
             log(`输入: ${text}`);
             const result = await apiCall('type', {text});
-            if (result.status === 'success') {
-                log('✅ 输入成功', 'success');
-            }
+            if (result.status === 'success') { log('✅ 输入成功', 'success'); setTimeout(refreshScreenshot, 500); }
         }
-        
+
         async function doEnter() {
             log('按回车...');
             await apiCall('key', {key: 'Enter'});
-            setTimeout(refreshScreenshot, 300);
+            setTimeout(function () { refreshScreenshot(true); }, 500);
         }
-        
+
         async function doNavigate() {
             const url = document.getElementById('navUrl').value;
             if (!url) return;
@@ -209,28 +273,28 @@ body{background:var(--ink);color:var(--enamel);font-family:var(--f-body);min-hei
             const result = await apiCall('navigate', {url});
             if (result.status === 'success') {
                 log('✅ 跳转成功', 'success');
-                setTimeout(refreshScreenshot, 1000);
+                setTimeout(function () { refreshScreenshot(true); }, 1200);
             }
         }
-        
+
         async function doScreenshot() {
-            log('刷新截图...');
-            await refreshScreenshot();
-            log('✅ 截图已更新', 'success');
+            log('刷新画面...');
+            await refreshScreenshot(true);
+            log('✅ 已刷新', 'success');
         }
-        
+
         async function doScroll(dir) {
             log(`${dir === 'down' ? '向下' : '向上'}滚动...`);
             await apiCall('scroll', {direction: dir});
-            setTimeout(refreshScreenshot, 300);
+            setTimeout(function () { refreshScreenshot(true); }, 600);
         }
-        
+
         async function doRefresh() {
             log('刷新页面...');
             await apiCall('refresh');
-            setTimeout(refreshScreenshot, 1000);
+            setTimeout(function () { refreshScreenshot(true); }, 1200);
         }
-        
+
         async function doSelectorClick() {
             const sel = document.getElementById('selector').value;
             if (!sel) return;
@@ -238,13 +302,10 @@ body{background:var(--ink);color:var(--enamel);font-family:var(--f-body);min-hei
             const result = await apiCall('selector_click', {selector: sel});
             if (result.status === 'success') {
                 log('✅ 点击成功', 'success');
-                setTimeout(refreshScreenshot, 500);
-            } else {
-                log('❌ ' + result.message, 'error');
+                setTimeout(function () { refreshScreenshot(true); }, 600);
             }
         }
-        
-        // Click on image to set coordinates
+
         img.addEventListener('click', function(e) {
             const rect = img.getBoundingClientRect();
             const scaleX = imgNaturalW / rect.width;
@@ -259,7 +320,7 @@ body{background:var(--ink);color:var(--enamel);font-family:var(--f-body);min-hei
             coordDisplay.textContent = `(${x}, ${y})`;
             log(`选择坐标: (${x}, ${y})`);
         });
-        
+
         img.addEventListener('mousemove', function(e) {
             const rect = img.getBoundingClientRect();
             const scaleX = imgNaturalW / rect.width;
@@ -271,20 +332,19 @@ body{background:var(--ink);color:var(--enamel);font-family:var(--f-body);min-hei
             coordDisplay.style.top = (e.clientY + 10) + 'px';
             coordDisplay.textContent = `(${x}, ${y})`;
         });
-        
-        img.addEventListener('mouseleave', function() {
-            coordDisplay.style.display = 'none';
-        });
-        
+
+        img.addEventListener('mouseleave', function() { coordDisplay.style.display = 'none'; });
+
         img.addEventListener('load', function() {
             imgNaturalW = img.naturalWidth;
             imgNaturalH = img.naturalHeight;
         });
-        
-        // Initial load
+
         refreshScreenshot();
-        // Auto-refresh every 3 seconds
+        refreshState();
         setInterval(refreshScreenshot, 3000);
+        setInterval(refreshState, 5000);
+        setInterval(renderMeta, 1000);
         log('远程控制面板已启动');
     </script>
 </body>

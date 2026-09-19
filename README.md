@@ -1,6 +1,6 @@
 English | **[中文](README_zh.md)**
 
-# 🚄 KTMB Auto Ticket Bot v1.2
+# 🚄 KTMB Auto Ticket Bot v1.3.2
 
 An automated ticket booking system for Malaysia's KTMB train service, supporting both **Windows** and **Linux** platforms.
 
@@ -24,6 +24,43 @@ Powered by Playwright browser automation to simulate real user operations — fu
 | 🔐 **Web Panel Authentication** | Password-protected web panel to prevent unauthorized access |
 | 📝 **Structured Logging** | Professional logging system with file output and console display |
 | 🔄 **Notification Retry** | Telegram notifications with automatic retry and exponential backoff |
+| 🎮 **Web Remote Control** | `/remote` live screen with mouse click / keyboard / CSS selector control - works even when Telegram is blocked |
+
+
+---
+
+## 🆕 What v1.3.2 fixes (vs v1.3)
+
+| Symptom | Root cause | Fix |
+|---------|-----------|-----|
+| **Windows: "cannot reach Telegram" every now and then** | A fresh TCP/TLS connection per request, no retry, no way to tell "no network / bad token / another instance stealing getUpdates"; a half-broken IPv6 stack hangs on the AAAA record | All requests now use a **pooled session** (keep-alive), connection failures are retried and automatically **fall back to IPv4**; HTTP 401/409/400 print an explicit reason; new proxy switch `telegram_proxy` / `KTMB_TG_PROXY` |
+| **Telegram commands flaky (HTTP 409)** | Two bot instances running at once (the Start button could be pressed again after a panel restart) | The panel now tracks the bot PID and refuses to start a second instance; 409 is reported clearly |
+| **Element not found -> silent freeze, no error, no retry** | Waits never checked external state; failures were just a one-line warning | New `tick()` heartbeat makes **every long wait interruptible**; `click_first` retries and logs the **current URL / title / visible buttons** plus a screenshot; a watchdog reports the scene after 2 minutes of no heartbeat |
+| **`/remote` stuck on "connecting", no picture** | Panel wrote a request, waited 3s for the bot to screenshot; a busy bot always timed out and the page kept showing a stale frame | The bot now **publishes a frame every 5s** (`screenshot_interval`); the panel serves the newest frame; the page shows frame age / bot state / phase and real command results |
+| **Remote clicks land in the wrong place** | Full-page screenshot coordinates do not match the browser viewport | Screenshots are viewport-sized now, so clicks map 1:1 |
+| **`/manual` exited the program and logged out** | Manual hand-over was treated as "task done" | `/manual` now enters **manual mode**: the browser stays open, the bot stops touching the page; `/cancel` resumes, `/logout` exits |
+| Stop took minutes while waiting at the payment gateway | Up to 120s of uninterruptible waiting | Waiting is now sliced and always answers stop; missing buttons report the current page |
+| Seat selection reported success although nothing was booked | No verification | Missing booking data *and* missing passenger button is now a failure with a scene report |
+| Overlays blocked every later click | The fallback only hid modals with inline styles (Bootstrap 5 modals survived) | It now hides every **visible** `.modal` (seat modal preserved) |
+| Blank page / 502 counted as "logged in" | `is_logged_in` only checked for a login link | Now also checks domain, readyState and page content |
+| Panel restart lost the session / could not stop the old bot | Random secret key; only its own child process was tracked | Secret key persisted to `.flask_secret`; PID file + heartbeat double detection, so a restarted panel can still stop the bot safely |
+| Viewport stuck at 1920x2500 after screenshots | `enlarge_and_shot` never restored it | Viewport restored after the shot |
+
+> Still recommended: never run two instances on the same KTMB account, and always stop with the panel button or Telegram `/logout`.
+
+---
+
+## 🎮 Web remote control (/remote)
+
+Click **Remote** in the top-right corner of the panel, or open `http://127.0.0.1:5000/remote`:
+
+- Left side: **live view** of the bot's browser (auto-refresh every 3s, the bot publishes a frame every 5s by default)
+- **Click anywhere on the picture** to fill the coordinates, then press "Click here" to click that exact spot (viewport coordinates)
+- Supports click / type text / Enter / navigate / scroll / refresh / **CSS selector click**
+- Every command shows the **real result returned by the bot** (success or the failure reason)
+- The status box shows how old the frame is, whether the bot is running, and the current phase
+
+> Handy when Telegram is blocked, or when you want to take over the payment manually.
 
 ---
 
@@ -69,7 +106,12 @@ Click **Save** → **Start**, then wait for tickets 🎉
 | `KTMB_WEB_PORT` | `5000` | Web panel listen port |
 | `KTMB_WEB_DEBUG` | `false` | Enable Flask debug mode |
 | `KTMB_MAX_LOG_LINES` | `200` | Maximum log lines returned by API |
-| `FLASK_SECRET_KEY` | (auto-generated) | Flask session encryption key |
+| `FLASK_SECRET_KEY` | auto-generated, saved to `.flask_secret` | Flask session key (sessions survive panel restarts) |
+| `KTMB_HEADLESS` | `1` on Linux, `0` from the Windows launcher | Run headless (`0` = show the browser window) |
+| `KTMB_CHROME_PROFILE` | `chrome_profile/` in the project | Chromium user data directory |
+| `KTMB_CHROME_PORT` | `chrome_port` from config | Chrome debug port (take over via chrome://inspect) |
+| `KTMB_TG_PROXY` | (follow system proxy) | Proxy for Telegram, e.g. `http://127.0.0.1:7890`; `off` = force direct connection |
+| `KTMB_TG_IPV4` | `0` | `1` = use IPv4 only from the start (for half-broken IPv6 networks) |
 
 ---
 
@@ -91,6 +133,23 @@ Click **Save** → **Start**, then wait for tickets 🎉
 | `/logout` | Safely log out of KTMB and shut down |
 
 > Every command supports `/cmd all` (broadcast) and `/cmd1` (target Bot ID=1), e.g. `/status1`, `/snap all`
+
+### When Telegram cannot be reached
+
+1. Read `bot.log`: the reason is printed (`ConnectionError` / `SSL error` / `HTTP 401` bad token / `HTTP 409` another instance is polling)
+2. Bad token -> paste a new one in the panel; `409` -> make sure only one bot is running
+3. Behind a proxy -> set `notification.telegram_proxy` in `config.json`, or `KTMB_TG_PROXY=http://127.0.0.1:7890`
+4. If the proxy makes it worse -> `KTMB_TG_PROXY=off` forces a direct connection
+5. The bot keeps retrying by itself once the network is back - no restart needed
+
+### notification settings
+
+| Field | Description |
+|-------|-------------|
+| `telegram_token` | Token from BotFather |
+| `telegram_chat_id` | Your chat id (send the bot a message first) |
+| `heartbeat_screenshot` | Attach a screenshot to the heartbeat (true/false) |
+| `telegram_proxy` | Optional. Proxy for Telegram, e.g. `http://127.0.0.1:7890`; `off` = force direct |
 
 ---
 
@@ -151,6 +210,7 @@ Click **Save** → **Start**, then wait for tickets 🎉
 | `chrome_port` | Chrome debug port (default 9222) |
 | `heartbeat_interval` | Send heartbeat notification every N cycles |
 | `refresh_interval` | Seconds to wait when no tickets available (default 180) |
+| `screenshot_interval` | How often to publish a frame for `/remote` (default 5s, `0` = disable) |
 
 ---
 
@@ -201,6 +261,11 @@ This version protects against that in several ways:
 | Log file too large | Rotated automatically to `bot.log.1` above 5MB |
 | **Windows: `Executable doesn't exist at ...\browsers\chromium_headless_shell-XXXX\...`** | **Fixed in v1.3.1.** The old `start_bot.bat` set `PLAYWRIGHT_BROWSERS_PATH` *after* `playwright install`, so Chromium was downloaded into the default cache (`%LOCALAPPDATA%\ms-playwright`) while the bot looked inside `.\browsers` - exactly this error. The variable is now set before installing, and the browser is installed + verified on every launch. If it still fails, delete the `browsers\` folder and run the launcher again. |
 | `cannot connect to existing Chrome: ECONNREFUSED ::1:9222` | Harmless: the bot starts its own Chromium. It only means "no external Chrome to attach to". |
+| **Telegram never connects although the network is fine** | Since v1.3.2: pooled connections, automatic retries, automatic IPv4 fallback, and a precise reason in the log. Behind a proxy set `KTMB_TG_PROXY=http://127.0.0.1:7890`; if the proxy breaks it, set `KTMB_TG_PROXY=off`. A wrong token gives `HTTP 401`, two instances give `HTTP 409`. |
+| **`/remote` stays on "connecting" with no picture** | The bot publishes frames continuously now: check whether the "phase" is moving; the page tells you whether the bot is not running or has not produced a frame yet. If the frame age never changes, look for the `[看门狗]` / `[定位失败]` lines in `bot.log`. |
+| **Remote clicks do nothing / hit the wrong spot** | Screenshots are viewport-sized now, so you click exactly what you see. Blocking overlays are reported through the command result. |
+| **`/manual` closed the browser and exited** | Fixed in v1.3.2: `/manual` keeps the browser open in manual mode, `/cancel` resumes monitoring. |
+| `[看门狗] no heartbeat for N seconds` in the log | The bot is stuck inside a browser call. Send the surrounding 50 log lines; the panel Stop button still works and logs out safely. |
 | Stopping the bot takes very long | Since v1.3.1 the bot polls for a stop request even during login retries / searches / payment standby, so it logs out and exits within 1-3s (no hard kill, no 30-minute cooldown). |
 
 ---

@@ -6,6 +6,16 @@ rem  2. A Chrome window will open by itself (that is the bot's browser - keep it
 rem  3. Open http://127.0.0.1:5000 in your browser
 rem  4. Press Ctrl+C in this window to stop (the bot logs out first)
 rem
+rem  v1.3.2 fixes
+rem  ----------------------------------------------------------
+rem  [D] The bot now keeps the web panel's /remote screen alive by
+rem      publishing a screenshot every few seconds, and every wait
+rem      loop answers "stop" / remote clicks within ~1 second.
+rem  [E] If api.telegram.org cannot be reached, set a proxy with:
+rem        set KTMB_TG_PROXY=http://127.0.0.1:7890
+rem      or force direct connection (ignore system proxy) with:
+rem        set KTMB_TG_PROXY=off
+rem
 rem  v1.3.1 fixes
 rem  ----------------------------------------------------------
 rem  [A] PLAYWRIGHT_BROWSERS_PATH must be set BEFORE "playwright install
@@ -76,6 +86,7 @@ if not errorlevel 1 (
 echo [6/6] Starting web panel - keep this window open...
 echo.
 echo   Panel   : http://127.0.0.1:%KTMB_WEB_PORT%
+echo   Remote  : http://127.0.0.1:%KTMB_WEB_PORT%/remote   (live screen + click/keyboard)
 echo   Browser : a Chrome window will open automatically (debug port %KTMB_CHROME_PORT%)
 echo   Profile : %KTMB_CHROME_PROFILE%
 echo   Stop    : Ctrl+C  (the bot logs out of KTMB before exiting)

@@ -19,7 +19,8 @@
     "notification": {
         "telegram_token": "your_bot_token_here",
         "telegram_chat_id": "your_chat_id_here",
-        "heartbeat_screenshot": true
+        "heartbeat_screenshot": true,
+        "telegram_proxy": ""
     },
     "preferences": {
         "prefer_normal_seat": true,
@@ -37,6 +38,7 @@
         "bot_id": "1",
         "chrome_port": 9222,
         "heartbeat_interval": 500,
-        "refresh_interval": 180
+        "refresh_interval": 180,
+        "screenshot_interval": 5
     }
 }

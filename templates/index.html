@@ -188,12 +188,13 @@ h1{font-family:var(--f-display);font-weight:700;font-size:30px;letter-spacing:.0
     <div class="brand-mark">KTMB</div>
     <div>
       <h1 data-i18n="title">抢票指挥官</h1>
-      <div class="brand-sub">Dispatch Console · v1.3</div>
+      <div class="brand-sub">Dispatch Console · v1.3.2</div>
     </div>
   </div>
   <div class="masthead-right">
     <div class="clock" id="clock">--:--:--</div>
     <button class="ghost-btn" onclick="toggleLang()" data-i18n="lang_btn">中/EN</button>
+    <a class="ghost-btn" href="/remote" target="_blank" data-i18n="remote_btn">远程控制</a>
     <a class="ghost-btn" href="/logout" data-i18n="logout_btn">登出</a>
   </div>
 </header>
@@ -208,6 +209,8 @@ h1{font-family:var(--f-display);font-weight:700;font-size:30px;letter-spacing:.0
         <span class="pill"><i id="status-dot" class="dot stopped"></i><span id="status-text">已停止</span></span>
         <span class="pill"><span data-i18n="refresh_label">刷新间隔</span><b id="refresh-display">180s</b></span>
         <span class="pill"><span data-i18n="monitoring_tasks">监控任务</span><b id="task-count">0</b></span>
+        <span class="pill"><span data-i18n="phase_label">阶段</span><b id="phase-display">-</b></span>
+        <span class="pill"><span>TG</span><b id="tg-display">-</b></span>
       </div>
       <div class="deck-actions">
         <button id="btn-start" class="lever start" onclick="startBot()">&#9654; <span data-i18n="btn_start">启动抢票</span></button>
@@ -420,6 +423,9 @@ var i18nDict = {
     page_title: 'KTMB 抢票指挥官',
     title: '抢票指挥官',
     lang_btn: '中/EN',
+    remote_btn: '远程控制',
+    phase_label: '阶段',
+    stopping: '正在停止：等机器人安全登出 KTMB...',
     logout_btn: '登出',
     bot_status: '机器人状态',
     status_stopped: '已停止',
@@ -502,6 +508,9 @@ var i18nDict = {
     page_title: 'KTMB Ticket Commander',
     title: 'Ticket Commander',
     lang_btn: 'EN/中',
+    remote_btn: 'Remote',
+    phase_label: 'Phase',
+    stopping: 'Stopping: waiting for safe KTMB logout...',
     logout_btn: 'Logout',
     bot_status: 'Bot Status',
     status_stopped: 'STOPPED',
@@ -739,7 +748,7 @@ function syncTasksFromDOM() {
       to: block.querySelector('.station-to').value,
       year: parseInt(block.querySelector('.task-year').value, 10) || new Date().getFullYear(),
       month: parseInt(block.querySelector('.task-month').value, 10) || 1,
-      day: block.querySelector('.task-day').value || '1',
+      day: parseInt(block.querySelector('.task-day').value, 10) || 1,
       time: block.querySelector('.task-time').value || '00:00',
       train_mode: block.querySelector('.task-type').value || 'auto',
       type: t('monitor_plan') + ' ' + (idx + 1)
@@ -857,21 +866,33 @@ function saveConfig() {
     showToast(t('alert_network_error'), 'error');
   });
 }
+var stopping = false;
 function startBot() {
+  document.getElementById('btn-start').disabled = true;
   fetch('/api/start', { method: 'POST' })
   .then(function (res) { return res.json(); })
   .then(function (data) {
-    if (data.status === 'success') { updateStatus(); showToast(t('alert_started'), 'success'); }
+    if (data.status === 'success') { showToast(t('alert_started'), 'success'); }
     else { showToast(data.message || t('alert_already_running'), 'warning'); }
+    updateStatus();
   })
-  .catch(function () { showToast(t('alert_network_error'), 'error'); });
+  .catch(function () { showToast(t('alert_network_error'), 'error'); updateStatus(); });
 }
 function stopBot() {
-  showToast(t('alert_stopped'), 'info');
+  if (stopping) return;
+  stopping = true;
+  document.getElementById('btn-stop').disabled = true;
+  document.getElementById('btn-start').disabled = true;
+  showToast(t('stopping'), 'info');
   fetch('/api/stop', { method: 'POST' })
   .then(function (res) { return res.json(); })
-  .then(function () { updateStatus(); })
-  .catch(function () { showToast(t('alert_network_error'), 'error'); });
+  .then(function (data) {
+    stopping = false;
+    if (data && data.status === 'success') showToast(t('alert_stopped'), 'success');
+    else showToast((data && data.message) || t('alert_stopped'), 'warning');
+    updateStatus();
+  })
+  .catch(function () { stopping = false; showToast(t('alert_network_error'), 'error'); updateStatus(); });
 }
 
 // ==================== status board ====================
@@ -900,10 +921,16 @@ function updateStatus() {
   .then(function (res) { return res ? res.json() : null; })
   .then(function (data) {
     if (!data) return;
-    if (lastStatus !== data.running) {
-      lastStatus = data.running;
-      applyStatus(data.running);
+    var running = !!data.running;
+    if (lastStatus !== running) {
+      lastStatus = running;
+      if (!stopping) applyStatus(running);
     }
+    var phaseEl = document.getElementById('phase-display');
+    if (phaseEl) phaseEl.textContent = running ? (data.phase || '-') : '-';
+    var tgEl = document.getElementById('tg-display');
+    if (tgEl) tgEl.textContent = (data.telegram === 'down') ? '\u274C' : (data.telegram === 'ok' ? '\u2705' : '-');
+    if (stopping && !running) { stopping = false; showToast(t('alert_stopped'), 'success'); }
   })
   .catch(function (err) { console.error('Status fetch failed:', err); });
 }
