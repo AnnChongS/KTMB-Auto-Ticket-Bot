@@ -270,22 +270,44 @@ def send_telegram_photo(caption, image_bytes):
     logger.error("[TG截图] 所有重试均失败，截图未送达")
 
 
-def flush_telegram_updates():
-    """清空之前的历史指令，防止一开机就执行以前的 /logout 导致自杀"""
+BOT_START_TS = int(time.time())
+
+
+def _is_stale_message(message):
+    """启动之前发出的消息 -> 一律忽略
+
+    你的网络对 Telegram 时通时断，很多 getUpdates 请求失败，导致旧消息一直积压在
+    Telegram 服务器上没有被确认。等网络恢复时它们会被一次性推回来 —— 于是机器人
+    "自己收到 /manual 然后退出"。用发送时间过滤掉这些历史消息。
+    """
+    ts = message.get("date")
+    if not ts:
+        return False
+    return int(ts) < BOT_START_TS - 5
+
+
+def prime_telegram_offset():
+    """只取 offset、丢弃积压的旧消息；绝不执行其中任何一条"""
     if not TELEGRAM_BOT_TOKEN:
         return None
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, params={"timeout": 0, "allowed_updates": ["message"]}, timeout=10)
         resp.raise_for_status()
+        _tg_ok()
         data = resp.json()
-        if data.get("ok") and len(data.get("result", [])) > 0:
-            return data["result"][-1]["update_id"] + 1
+        results = data.get("result", []) if data.get("ok") else []
+        if results:
+            logger.info(f"[TG] 丢弃 {len(results)} 条积压的旧消息（避免旧指令被重放）")
+            return results[-1]["update_id"] + 1
     except requests.exceptions.RequestException as e:
-        _tg_net_fail("清空历史指令", e)
-    except (KeyError, IndexError, ValueError) as e:
-        logger.warning(f"[TG] 解析历史指令响应失败: {e}")
+        _tg_net_fail("初始化指令偏移", e)
     return None
+
+
+def flush_telegram_updates():
+    """清空之前的历史指令，防止一开机就执行以前的 /logout 导致自杀"""
+    return prime_telegram_offset()
 
 
 TELEGRAM_COMMANDS = {
@@ -436,30 +458,38 @@ def parse_telegram_command(text):
     return command, target_id
 
 
-def check_telegram_command(offset=None):
-    """检查 Telegram 是否有新指令"""
+def check_telegram_command(offset=None, long_poll=False):
+    """检查 Telegram 是否有新指令
+
+    long_poll=True 时用长轮询（timeout=20）：有消息立刻返回，没有就挂着等，
+    比"每 3 秒问一次"快得多，请求数也少得多（你之前觉得慢就是这个原因）。
+    """
     global SHOULD_LOGOUT_AND_EXIT
     if not TELEGRAM_BOT_TOKEN:
         return None, None, offset
 
+    wait_s = 20 if long_poll else 0
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-        params = {"timeout": 0, "allowed_updates": ["message"]}
+        params = {"timeout": wait_s, "allowed_updates": ["message"]}
         if offset:
             params["offset"] = offset
 
-        resp = requests.get(url, params=params, timeout=10)
+        resp = requests.get(url, params=params, timeout=wait_s + 10)
         resp.raise_for_status()
+        _tg_ok()
         data = resp.json()
         results = data.get("result", []) if data.get("ok") else []
         if not results:
             return None, None, offset
 
         new_offset = results[-1]["update_id"] + 1
-
-        # 依次处理所有积压消息，返回第一个有效指令
+        skipped = 0
         for update in results:
             message = update.get("message") or {}
+            if _is_stale_message(message):
+                skipped += 1
+                continue
             command, target_id = parse_telegram_command(message.get("text", ""))
             if not command:
                 continue
@@ -468,6 +498,8 @@ def check_telegram_command(offset=None):
                 logger.info("[TG] 收到 logout 指令，标记退出")
             return command, target_id, new_offset
 
+        if skipped:
+            logger.info(f"[TG] 忽略 {skipped} 条启动前发来的旧消息")
         return None, None, new_offset
     except requests.exceptions.RequestException as e:
         _tg_net_fail("检查指令", e)
@@ -1611,14 +1643,15 @@ def wait_for_payment_command(page, context):
     )
     send_notification(msg)
 
-    _, _, last_offset = check_telegram_command(offset=None)
+    # 关键：进入待命前先丢弃积压的旧消息（否则很久以前发的 /manual 会被当成新指令执行）
+    last_offset = prime_telegram_offset()
     deadline = time.time() + 20 * 60
     while time.time() < deadline:
         if SHOULD_LOGOUT_AND_EXIT:
             return False
         handle_remote_control(page)
 
-        command, target_id, new_offset = check_telegram_command(offset=last_offset)
+        command, target_id, new_offset = check_telegram_command(offset=last_offset, long_poll=True)
         if command:
             last_offset = new_offset
             if process_telegram_command(page, command, target_id):
@@ -1638,8 +1671,11 @@ def wait_for_payment_command(page, context):
                 break
         except Exception:
             break
-        if not interruptible_sleep(3):
-            break
+        # 长轮询本身就在等消息，这里只做一点点节流（网络不通时避免空转）
+        if not command:
+            time.sleep(0.5)
+        if SHOULD_LOGOUT_AND_EXIT:
+            return False
     return True
 
 
@@ -1839,6 +1875,9 @@ def handle_passenger_and_payment(page, context, train_mode="auto"):
 def run(playwright: Playwright) -> None:
     """主运行函数"""
     global SHOULD_LOGOUT_AND_EXIT
+
+    global BOT_START_TS
+    BOT_START_TS = int(time.time())
 
     # 清掉上一次残留的"停止/截图"命令文件，否则新进程一起来就自杀（表现为一直 loop）
     try:
