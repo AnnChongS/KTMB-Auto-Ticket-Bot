@@ -915,8 +915,13 @@ function pollLogs() {
   .then(function (res) { return res ? res.json() : null; })
   .then(function (data) {
     if (!data) return;
+    var consoleEl = document.getElementById('log-console');
+    if (data.reset) {
+      // 机器人重启过：整块重画，不再追加
+      consoleEl.innerHTML = '';
+      lastLogLine = 0;
+    }
     if (data.logs && data.logs.length > 0) {
-      var consoleEl = document.getElementById('log-console');
       var stick = document.getElementById('autoscroll').checked;
       var colored = colorizeLog(data.logs);
       if (lastLogLine === 0) consoleEl.innerHTML = colored;

@@ -182,6 +182,29 @@ TG_RETRY_DELAY = 2  # 秒
 # ==========================================================
 
 
+_TG_NET = {"down": False, "last_log": 0.0}
+
+
+def _tg_net_fail(where, err):
+    """Telegram 连不上时的统一处理：不重试、不刷屏，每 60 秒提示一次"""
+    now = time.time()
+    first = not _TG_NET["down"]
+    _TG_NET["down"] = True
+    if first or now - _TG_NET["last_log"] >= 60:
+        _TG_NET["last_log"] = now
+        if first:
+            logger.warning(f"[TG] 连不上 api.telegram.org（{str(err)[:90]}）")
+            logger.warning("[TG] 通知与 Telegram 指令暂时不可用；可改用网页端远程控制页；网络恢复后会自动继续")
+        else:
+            logger.info("[TG] 仍无法连接 Telegram，稍后自动重试")
+
+
+def _tg_ok():
+    if _TG_NET["down"]:
+        _TG_NET["down"] = False
+        logger.info("[TG] Telegram 已恢复连接")
+
+
 def send_notification(message):
     """发送 Telegram 文字通知，带重试机制"""
     current_time = datetime.now().strftime('%H:%M:%S')
@@ -200,17 +223,18 @@ def send_notification(message):
             if resp.status_code == 200:
                 return
             logger.warning(f"[TG通知] 发送失败 (HTTP {resp.status_code})，重试 {attempt + 1}/{TG_MAX_RETRIES}")
+        except requests.exceptions.ConnectionError as e:
+            _tg_net_fail("发送通知", e)
+            return
         except requests.exceptions.Timeout:
-            logger.warning(f"[TG通知] 请求超时，重试 {attempt + 1}/{TG_MAX_RETRIES}")
-        except requests.exceptions.ConnectionError:
-            logger.warning(f"[TG通知] 连接失败，重试 {attempt + 1}/{TG_MAX_RETRIES}")
+            logger.debug(f"[TG通知] 请求超时，重试 {attempt + 1}/{TG_MAX_RETRIES}")
         except Exception as e:
-            logger.warning(f"[TG通知] 发送异常: {e}，重试 {attempt + 1}/{TG_MAX_RETRIES}")
+            logger.debug(f"[TG通知] 发送异常: {e}，重试 {attempt + 1}/{TG_MAX_RETRIES}")
 
         if attempt < TG_MAX_RETRIES - 1:
-            time.sleep(TG_RETRY_DELAY * (attempt + 1))  # 指数退避
+            time.sleep(TG_RETRY_DELAY * (attempt + 1))
 
-    logger.error("[TG通知] 所有重试均失败，通知未送达")
+    logger.debug("[TG通知] 未送达")
 
 
 def send_telegram_photo(caption, image_bytes):
@@ -232,12 +256,13 @@ def send_telegram_photo(caption, image_bytes):
             if resp.status_code == 200:
                 return
             logger.warning(f"[TG截图] 发送失败 (HTTP {resp.status_code})，重试 {attempt + 1}/{TG_MAX_RETRIES}")
+        except requests.exceptions.ConnectionError as e:
+            _tg_net_fail("发送截图", e)
+            return
         except requests.exceptions.Timeout:
-            logger.warning(f"[TG截图] 请求超时，重试 {attempt + 1}/{TG_MAX_RETRIES}")
-        except requests.exceptions.ConnectionError:
-            logger.warning(f"[TG截图] 连接失败，重试 {attempt + 1}/{TG_MAX_RETRIES}")
+            logger.debug(f"[TG截图] 请求超时，重试 {attempt + 1}/{TG_MAX_RETRIES}")
         except Exception as e:
-            logger.warning(f"[TG截图] 发送异常: {e}，重试 {attempt + 1}/{TG_MAX_RETRIES}")
+            logger.debug(f"[TG截图] 发送异常: {e}，重试 {attempt + 1}/{TG_MAX_RETRIES}")
 
         if attempt < TG_MAX_RETRIES - 1:
             time.sleep(TG_RETRY_DELAY * (attempt + 1))
@@ -257,7 +282,7 @@ def flush_telegram_updates():
         if data.get("ok") and len(data.get("result", [])) > 0:
             return data["result"][-1]["update_id"] + 1
     except requests.exceptions.RequestException as e:
-        logger.warning(f"[TG] 清空历史指令失败: {e}")
+        _tg_net_fail("清空历史指令", e)
     except (KeyError, IndexError, ValueError) as e:
         logger.warning(f"[TG] 解析历史指令响应失败: {e}")
     return None
@@ -445,7 +470,7 @@ def check_telegram_command(offset=None):
 
         return None, None, new_offset
     except requests.exceptions.RequestException as e:
-        logger.debug(f"[TG] 检查指令网络错误: {e}")
+        _tg_net_fail("检查指令", e)
     except (KeyError, IndexError, ValueError) as e:
         logger.debug(f"[TG] 解析指令响应失败: {e}")
     return None, None, offset
@@ -1831,23 +1856,17 @@ def run(playwright: Playwright) -> None:
 
     # 方式1: 尝试连接已有的 Chrome 调试进程
     mode = "无窗口(headless)" if HEADLESS else "可见窗口(headed)"
-    logger.info(f"[连接] 尝试接管已有 Chrome (Port {CHROME_DEBUG_PORT})...")
-    for _try in range(1, 6):
-        try:
-            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{CHROME_DEBUG_PORT}")
-            context = browser.contexts[0]
-            page = context.pages[0] if context.pages else context.new_page()
-            page.set_viewport_size({"width": 1920, "height": 1080})
-            logger.info(f"[连接] 已接管你在端口 {CHROME_DEBUG_PORT} 上打开的 Chrome")
-            break
-        except Exception as e:
-            browser = None
-            logger.debug(f"[连接] CDP 第 {_try} 次失败: {e}")
-            if _try == 5:
-                logger.info(f"[连接] 端口 {CHROME_DEBUG_PORT} 上没有现成 Chrome，"
-                            f"由机器人启动自己的 Chromium（{mode}）...")
-            else:
-                time.sleep(1)
+    browser = None
+    logger.debug(f"[连接] 探测端口 {CHROME_DEBUG_PORT} 上有没有可接管的 Chrome ...")
+    try:
+        browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{CHROME_DEBUG_PORT}")
+        context = browser.contexts[0]
+        page = context.pages[0] if context.pages else context.new_page()
+        page.set_viewport_size({"width": 1920, "height": 1080})
+        logger.info(f"[连接] 已接管端口 {CHROME_DEBUG_PORT} 上的 Chrome")
+    except Exception as e:
+        browser = None
+        logger.debug(f"[连接] 端口 {CHROME_DEBUG_PORT} 无现成 Chrome: {str(e).splitlines()[0][:80]}")
 
     if browser is None:
         # 预检：真的启动一次浏览器，失败就给可操作提示

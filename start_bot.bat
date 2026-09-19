@@ -2,20 +2,20 @@
 rem ============================================================
 rem  KTMB Ticket Commander - Windows launcher
 rem  1. Double-click this file
-rem  2. A Chrome window will open (that is the bot's browser - do not close it)
+rem  2. A Chrome window will open by itself (that is the bot's browser - keep it open)
 rem  3. Open http://127.0.0.1:5000 in your browser
 rem  4. Press Ctrl+C in this window to stop (the bot logs out first)
 rem
 rem  v1.3.1 fixes
 rem  ----------------------------------------------------------
-rem  [A] PLAYWRIGHT_BROWSERS_PATH used to be set AFTER "playwright install
-rem      chromium", so Chromium went to the default cache while the bot
-rem      looked in .\browsers  ->  "Executable doesn't exist at ...\browsers\...".
-rem      Now the variable is set before any playwright call, and the browser
-rem      is always installed + verified.
-rem  [B] The browser was headless (no window), so it looked like nothing
-rem      started. Now Chrome runs WITH A VISIBLE WINDOW and opens the
-rem      debugging port below, so you can watch / take over any time.
+rem  [A] PLAYWRIGHT_BROWSERS_PATH must be set BEFORE "playwright install
+rem      chromium", otherwise Chromium goes to the default cache while the
+rem      bot looks in .\browsers  -> "Executable doesn't exist at ...".
+rem      It is now set first, and the browser is always installed+verified.
+rem  [B] The browser is now VISIBLE (headed) and listens on the debug port
+rem      below, so you can actually watch it. The bot launches it itself -
+rem      no need to start Chrome manually (the debug port still works for
+rem      chrome://inspect if you ever want to take over).
 rem  [C] A stale "logout" command file could make a freshly started bot
 rem      kill itself instantly (looked like an endless loop) - it is now
 rem      cleared on start.
@@ -40,22 +40,22 @@ echo   KTMB Ticket Commander
 echo ===================================================
 echo.
 
-echo [1/7] Checking Python...
+echo [1/6] Checking Python...
 python --version >nul 2>&1
 if errorlevel 1 goto no_python
 
-echo [2/7] Checking virtual environment...
+echo [2/6] Checking virtual environment...
 if not exist "%VENV_PY%" (
     echo       creating venv...
     python -m venv venv
     if errorlevel 1 goto venv_fail
 )
 
-echo [3/7] Installing / updating dependencies...
+echo [3/6] Installing / updating dependencies...
 "%VENV_PY%" -m pip install -q --disable-pip-version-check --upgrade -r requirements.txt
 if errorlevel 1 goto pip_fail
 
-echo [4/7] Installing Chromium into:
+echo [4/6] Installing Chromium into:
 echo       %PLAYWRIGHT_BROWSERS_PATH%
 echo       ^(first run downloads about 150 MB, later runs are instant^)
 "%VENV_PY%" -m playwright install chromium
@@ -65,16 +65,7 @@ echo       verifying the browser really exists...
 "%VENV_PY%" -c "import os,sys;from playwright.sync_api import sync_playwright as s;pw=s().start();e=pw.chromium.executable_path;pw.stop();print('      browser: '+e);sys.exit(0 if os.path.exists(e) else 3)"
 if errorlevel 1 goto browser_verify_fail
 
-echo [5/7] Opening Chrome with remote debugging (a browser window should appear)...
-where chrome >nul 2>&1
-if errorlevel 1 (
-    echo       system Chrome not found - the bot will open its own Chromium window
-) else (
-    start "" chrome --remote-debugging-port=%KTMB_CHROME_PORT% --user-data-dir="%KTMB_CHROME_PROFILE%"
-    echo       chrome --remote-debugging-port=%KTMB_CHROME_PORT% --user-data-dir="%KTMB_CHROME_PROFILE%"
-)
-
-echo [6/7] Checking port %KTMB_WEB_PORT%...
+echo [5/6] Checking port %KTMB_WEB_PORT%...
 netstat -ano | findstr /r /c:":%KTMB_WEB_PORT% .*LISTENING" >nul 2>&1
 if not errorlevel 1 (
     echo [WARN] port %KTMB_WEB_PORT% is already in use.
@@ -82,12 +73,12 @@ if not errorlevel 1 (
     echo.
 )
 
-echo [7/7] Starting web panel - keep this window open...
+echo [6/6] Starting web panel - keep this window open...
 echo.
-echo   Panel    : http://127.0.0.1:%KTMB_WEB_PORT%
-echo   Browser  : visible Chrome, debug port %KTMB_CHROME_PORT%
-echo   Profile  : %KTMB_CHROME_PROFILE%
-echo   Browsers : %PLAYWRIGHT_BROWSERS_PATH%
+echo   Panel   : http://127.0.0.1:%KTMB_WEB_PORT%
+echo   Browser : a Chrome window will open automatically (debug port %KTMB_CHROME_PORT%)
+echo   Profile : %KTMB_CHROME_PROFILE%
+echo   Stop    : Ctrl+C  (the bot logs out of KTMB before exiting)
 echo.
 start "" cmd /c "timeout /t 4 >nul & start http://127.0.0.1:%KTMB_WEB_PORT%"
 "%VENV_PY%" app.py

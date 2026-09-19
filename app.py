@@ -310,38 +310,43 @@ def api_status():
 
 @app.route('/api/logs', methods=['GET'])
 def api_logs():
-    """获取日志 API，支持偏移量"""
+    """获取日志 API
+
+    注意 from_line 的语义：客户端传"我已经有多少行了"，服务端只回增量，
+    并且总是把 from_line 设成当前总行数。
+    （旧实现在"没有新行"时会把最后 N 行又发一遍，客户端就重复追加 → 越刷越长）
+    """
     if not is_authenticated():
         return jsonify({"logs": "未认证，请先登录"}), 401
 
-    # 支持 from_line 参数，返回指定行之后的日志
-    from_line = request.args.get('from_line', 0, type=int)
+    from_line = max(0, request.args.get('from_line', 0, type=int))
 
     try:
-        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+        with open(LOG_FILE, 'r', encoding='utf-8', errors='replace') as f:
             all_lines = f.readlines()
-            total_lines = len(all_lines)
-
-            if from_line > 0 and from_line < total_lines:
-                # 只返回新增的行
-                new_lines = all_lines[from_line:]
-                return jsonify({
-                    "logs": "".join(new_lines),
-                    "total_lines": total_lines,
-                    "from_line": from_line
-                })
-            else:
-                # 返回最后 N 行
-                return jsonify({
-                    "logs": "".join(all_lines[-MAX_LOG_LINES:]),
-                    "total_lines": total_lines,
-                    "from_line": max(0, total_lines - MAX_LOG_LINES)
-                })
     except FileNotFoundError:
-        return jsonify({"logs": "日志文件不存在...", "total_lines": 0, "from_line": 0})
+        return jsonify({"logs": "", "total_lines": 0, "from_line": 0, "reset": True})
     except Exception as e:
         logger.error(f"读取日志失败: {e}")
         return jsonify({"logs": f"读取日志失败: {str(e)}", "total_lines": 0, "from_line": 0}), 500
+
+    total_lines = len(all_lines)
+    reset = False
+    if from_line > total_lines:
+        # 机器人重启过 -> 日志被截断，让前端清空重画
+        start, reset = 0, True
+    elif from_line > 0:
+        start = from_line
+    else:
+        # 首次加载：只给最后 N 行
+        start = max(0, total_lines - MAX_LOG_LINES)
+
+    return jsonify({
+        "logs": "".join(all_lines[start:]),
+        "total_lines": total_lines,
+        "from_line": total_lines,
+        "reset": reset,
+    })
 
 
 # ================= 🎮 远程控制 =================
