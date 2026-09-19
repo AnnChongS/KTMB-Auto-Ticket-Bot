@@ -43,6 +43,29 @@ Ticket grabbing still works - you just get no notifications or commands. v1.3.4 
 
 > **Off by default**: for everyone who does not need it, behaviour is unchanged.
 
+### Which one should I pick? (30-second decision)
+
+| Your situation | Choose | What to fill in |
+|----------------|--------|-----------------|
+| Want it working now, this machine has admin rights | launcher **[1]** Cloudflare WARP | nothing - it enables SOCKS5 proxy mode for Telegram only |
+| You already have Clash / a VPN / a VPS proxy | launcher **[2]** | the proxy URL, e.g. `http://127.0.0.1:7890` |
+| **You own a domain (Cloudflare) and want to install nothing** | launcher **[3]** own reverse proxy | your Worker URL - see "prefix vs path style" below |
+| Not now | launcher **[4]** skip | nothing; grabbing works, you just get no notifications |
+
+> All three options affect **Telegram only**: KTMB traffic, the browser and the remote panel always stay direct.
+> You can change it any time in the panel (Alerts tab); the Test button tells you whether it works (and auto-fills the resolved URL).
+
+### Reverse proxy: prefix style vs path style
+
+Depends on how your Worker is written (if unsure, hit Test proxy for both - whichever shows OK is right):
+
+| Your Worker | Actual request looks like | "Telegram API base" value |
+|-------------|---------------------------|----------------------------|
+| **Prefix style** (prefix + full URL) | `https://worker.yourdomain.com/https://api.telegram.org/bot<token>/getMe` | **just `https://worker.yourdomain.com/`** - `/https://api.telegram.org` is appended automatically |
+| **Path style** (domain + secret path) | `https://tg.yourdomain.com/SECRET/bot<token>/getMe` | `https://tg.yourdomain.com/SECRET` (used as-is) |
+
+> Rule of thumb: **domain only (no path) = prefix style; with a path = path style**. Both are supported - and if you pick the wrong one, the test tells you.
+
 ### Option: Cloudflare Worker reverse proxy (no software to install)
 
 > **Both styles work:**
