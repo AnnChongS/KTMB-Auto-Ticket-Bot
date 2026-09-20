@@ -132,12 +132,35 @@ def _no_window_kwargs():
 
 
 def _pid_alive(pid):
+    """进程还活着吗？
+
+    Windows 上用 ctypes OpenProcess（毫秒级、不弹黑框、不依赖 wmic/powershell）。
+    以前每次 /api/status（每 3 秒一次）都去调 tasklist/wmic/powershell，
+    在部分机器上会卡住，表现就是"面板有 UI 但状态一直不出来"。
+    """
     if not pid:
         return False
     if os.name == 'nt':
         try:
-            out = subprocess.run(['tasklist', '/FI', f'PID eq {pid}'],
-                                 capture_output=True, text=True, timeout=10,
+            import ctypes
+            from ctypes import wintypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            SYNCHRONIZE = 0x00100000
+            STILL_ACTIVE = 259
+            k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                                     False, int(pid))
+            if not handle:
+                return False
+            code = wintypes.DWORD()
+            ok = k32.GetExitCodeProcess(handle, ctypes.byref(code))
+            k32.CloseHandle(handle)
+            return bool(ok) and code.value == STILL_ACTIVE
+        except Exception:
+            pass
+        try:
+            out = subprocess.run(['tasklist', '/FI', 'PID eq %d' % int(pid)],
+                                 capture_output=True, text=True, timeout=5,
                                  **_no_window_kwargs())
             return str(pid) in (out.stdout or '')
         except Exception:
@@ -157,11 +180,11 @@ def _pid_is_our_bot(pid):
         return False
     try:
         if os.name == 'nt':
-            for cmd in (['wmic', 'process', 'where', f'processid={pid}', 'get', 'commandline'],
-                        ['powershell', '-NoProfile', '-Command',
-                         f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"]):
+            for cmd, wait in ((['wmic', 'process', 'where', 'processid=%d' % pid, 'get', 'commandline'], 6),
+                              (['powershell', '-NoProfile', '-Command',
+                                '(Get-CimInstance Win32_Process -Filter "ProcessId=%d").CommandLine' % pid], 8)):
                 try:
-                    out = subprocess.run(cmd, capture_output=True, text=True, timeout=15,
+                    out = subprocess.run(cmd, capture_output=True, text=True, timeout=wait,
                                          **_no_window_kwargs())
                     text = (out.stdout or '') + (out.stderr or '')
                     if 'ktmb_auto.py' in text:
@@ -206,6 +229,7 @@ def _reap_bot():
         bot_process = None
         bot_started_at = None
         _clear_bot_pid()
+        _BOT_CHECK.update(ts=0.0, val=False)
         return True
     return False
 
@@ -226,17 +250,42 @@ def _bot_heartbeat_fresh(seconds=20):
         return False
 
 
-def bot_is_running():
-    """机器人是否在跑（面板重启过也能认出来）"""
+_BOT_CHECK = {"ts": 0.0, "val": False}
+
+
+def bot_is_running(cache_seconds=3.0):
+    """机器人是否在跑（面板重启过也能认出来）
+
+    热路径上只做「读 PID 文件 + ctypes 查进程 + 读心跳」这些毫秒级操作，
+    命令行查询只在必要时做一次，避免拖慢每 3 秒一次的状态轮询。
+    """
     _reap_bot()
     if bot_process is not None and bot_process.poll() is None:
+        _BOT_CHECK.update(ts=time.time(), val=True)
         return True
+    now = time.time()
+    if now - _BOT_CHECK["ts"] < cache_seconds:
+        return _BOT_CHECK["val"]
+
+    val = False
     pid = _read_bot_pid()
-    if pid and _pid_alive(pid) and _pid_is_our_bot(pid):
-        return True
-    if pid and not _pid_alive(pid):
-        _clear_bot_pid()
-    return _bot_heartbeat_fresh()
+    if pid:
+        if not _pid_alive(pid):
+            _clear_bot_pid()
+        else:
+            st = screenshot_state()
+            mpid = st.get("pid")
+            if mpid and int(mpid) == int(pid):
+                val = True                      # 心跳里就是它自己，秒判
+            elif _pid_is_our_bot(pid):
+                val = True
+            else:
+                logger.info(f"PID {pid} 不是我们的机器人（也不是心跳来源），清掉 PID 文件")
+                _clear_bot_pid()
+    if not val:
+        val = _bot_heartbeat_fresh()
+    _BOT_CHECK.update(ts=now, val=val)
+    return val
 
 
 def ensure_playwright_browser(env):
@@ -449,6 +498,7 @@ def api_start():
         )
         bot_started_at = time.time()
         _write_bot_pid(bot_process.pid)
+        _BOT_CHECK.update(ts=time.time(), val=True)
         logger.info(f"机器人已启动 (PID {bot_process.pid})")
         return jsonify({"status": "success", "message": "机器人已启动！", "warning": proxy_warning})
     except FileNotFoundError:
@@ -527,6 +577,7 @@ def stop_bot(timeout=60):
     bot_process = None
     bot_started_at = None
     _clear_bot_pid()
+    _BOT_CHECK.update(ts=0.0, val=False)
     if bot_log_file_handle:
         try:
             bot_log_file_handle.close()
@@ -556,8 +607,14 @@ def api_status():
     if not is_authenticated():
         return jsonify({"running": False, "error": "未认证"}), 401
 
-    running = bot_is_running()
-    state = screenshot_state()
+    try:
+        running = bot_is_running()
+        state = screenshot_state()
+    except Exception as e:
+        logger.warning(f"读取状态失败: {e}")
+        return jsonify({"running": False, "pid": None, "started_at": None,
+                        "screenshot_age": None, "phase": "", "page_url": "",
+                        "telegram": "", "api_base": "", "error": str(e)[:120]})
     return jsonify({
         "running": running,
         "pid": _read_bot_pid(),

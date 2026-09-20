@@ -453,6 +453,8 @@ var i18nDict = {
     bot_status: '机器人状态',
     status_stopped: '已停止',
     status_running: '运行中',
+    status_unreachable: '面板连不上后端',
+    status_back: '面板已恢复连接',
     monitoring_tasks: '监控任务',
     refresh_label: '刷新间隔',
     live_monitor: '实时监控台',
@@ -549,6 +551,8 @@ var i18nDict = {
     bot_status: 'Bot Status',
     status_stopped: 'STOPPED',
     status_running: 'RUNNING',
+    status_unreachable: 'Panel backend unreachable',
+    status_back: 'Panel reconnected',
     monitoring_tasks: 'Tasks',
     refresh_label: 'Refresh',
     live_monitor: 'Live Monitor',
@@ -849,7 +853,7 @@ function checkAuth(res) {
   if (res.status === 401) { window.location.href = '/login'; return null; }
   return res;
 }
-'// ==================== Telegram 代理 ====================
+// ==================== Telegram 代理 ====================
 function setProxyStatus(text, kind) {
   var el = document.getElementById('proxy-status');
   if (!el) return;
@@ -1003,12 +1007,19 @@ function applyStatus(isRunning) {
   document.getElementById('btn-stop').disabled = !isRunning;
   setFlipboard(label, isRunning);
 }
+var statusFails = 0;
 function updateStatus() {
-  fetch('/api/status')
+  // 8 秒超时：后端要是卡住，界面也要能自己报出来，不能一直空白
+  var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 8000) : null;
+  fetch('/api/status', ctrl ? { signal: ctrl.signal } : {})
   .then(function (res) { return checkAuth(res); })
   .then(function (res) { return res ? res.json() : null; })
   .then(function (data) {
+    if (timer) clearTimeout(timer);
     if (!data) return;
+    if (statusFails >= 3) showToast(t('status_back'), 'success');
+    statusFails = 0;
     var running = !!data.running;
     if (lastStatus !== running) {
       lastStatus = running;
@@ -1020,7 +1031,16 @@ function updateStatus() {
     if (tgEl) tgEl.textContent = (data.telegram === 'down') ? '\u274C' : (data.telegram === 'ok' ? '\u2705' : '-');
     if (stopping && !running) { stopping = false; showToast(t('alert_stopped'), 'success'); }
   })
-  .catch(function (err) { console.error('Status fetch failed:', err); });
+  .catch(function (err) {
+    if (timer) clearTimeout(timer);
+    statusFails++;
+    console.error('Status fetch failed:', err);
+    if (statusFails === 3) {
+      showToast(t('status_unreachable'), 'error');
+      setFlipboard(t('status_unreachable'), false);
+      document.getElementById('status-text').textContent = t('status_unreachable');
+    }
+  });
 }
 
 // ==================== log polling ====================
